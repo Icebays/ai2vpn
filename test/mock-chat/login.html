@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Mock sign in</title>
+<style>body{font-family:sans-serif;padding:40px} form:not([hidden]){display:flex;flex-direction:column;gap:10px;max-width:320px} .err{color:red}</style>
+</head>
+<body>
+<h1>Sign in to Mock</h1>
+<form id="f-email"><label>Email <input type="email" name="email" id="email"></label><button type="submit">Continue</button></form>
+<form id="f-pass" hidden><label>Password <input type="password" id="pass"></label><button type="submit">Log in</button><p class="err" id="perr"></p></form>
+<form id="f-code" hidden><label>Code <input autocomplete="one-time-code" id="code"></label><button type="submit">Verify</button></form>
+<script>
+  // email containing "2fa" requires a second step; password must be "hunter2"
+  let email = '';
+  const show = (id) => ['f-email', 'f-pass', 'f-code'].forEach((f) => (document.getElementById(f).hidden = f !== id));
+  const finish = () => { document.cookie = 'mock_auth=1; path=/'; setTimeout(() => (location.href = './'), 300); };
+  document.getElementById('f-email').onsubmit = (e) => { e.preventDefault(); email = document.getElementById('email').value; setTimeout(() => show('f-pass'), 300); };
+  document.getElementById('f-pass').onsubmit = (e) => {
+    e.preventDefault();
+    if (document.getElementById('pass').value !== 'hunter2') { document.getElementById('perr').textContent = 'Wrong password'; return; }
+    if (email.includes('2fa')) setTimeout(() => show('f-code'), 300); else finish();
+  };
+  document.getElementById('f-code').onsubmit = (e) => { e.preventDefault(); if (/^\d{6}$/.test(document.getElementById('code').value)) finish(); };
+</script>
+</body>
+</html>

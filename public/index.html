@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai2vpn</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%234f46e5'/><path d='M9 22l7-13 7 13' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Login -->
+<section id="login-view" class="center-view" hidden>
+  <form id="login-form" class="card login-card">
+    <div class="brand big"><span class="logo">▲</span> ai2vpn</div>
+    <p class="muted">Your AI accounts, behind your VPN, as an OpenAI-compatible API.</p>
+    <label>Password<input type="password" id="login-password" autocomplete="current-password" autofocus required></label>
+    <button class="btn primary wide" type="submit">Sign in</button>
+    <p id="login-error" class="error" hidden></p>
+  </form>
+</section>
+
+<!-- App -->
+<div id="app-view" hidden>
+  <header class="topbar">
+    <div class="brand"><span class="logo">▲</span> ai2vpn</div>
+    <nav class="tabs" id="tabs">
+      <button data-tab="accounts" class="active">Accounts</button>
+      <button data-tab="vpn">VPN</button>
+      <button data-tab="api">API</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+    <div class="top-right">
+      <button id="vpn-pill" class="pill" title="Exit IP of this container">VPN: …</button>
+      <button id="logout" class="btn ghost small">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Accounts -->
+    <section data-view="accounts">
+      <div class="section-head">
+        <div>
+          <h2>Accounts</h2>
+          <p class="muted">Each account is a real browser profile inside the container. Sign in to your ChatGPT / Claude / Gemini / … account once (email &amp; password, or in the remote browser), then call it through its own API key.</p>
+        </div>
+        <button class="btn primary" id="add-account-btn">+ Add account</button>
+      </div>
+      <div id="accounts" class="grid"></div>
+      <div id="accounts-empty" class="empty" hidden>
+        <p>No accounts yet.</p>
+        <button class="btn primary" onclick="openAddAccount()">Add your first account</button>
+      </div>
+    </section>
+
+    <!-- VPN -->
+    <section data-view="vpn" hidden>
+      <div class="section-head">
+        <div>
+          <h2>VPN</h2>
+          <p class="muted">All traffic from the browsers in this container leaves through the VPN. The web UI and API stay reachable on the host port.</p>
+        </div>
+      </div>
+      <div class="two-col">
+        <div class="card">
+          <h3>Connection</h3>
+          <div id="vpn-capable-warning" class="notice warn" hidden></div>
+          <div id="vpn-env-locked" class="notice" hidden>VPN mode is fixed by the <code>VPN_MODE</code> environment variable.</div>
+          <label>Mode
+            <select id="vpn-mode">
+              <option value="none">No VPN (direct)</option>
+              <option value="wireguard">WireGuard (.conf)</option>
+              <option value="openvpn">OpenVPN (.ovpn)</option>
+              <option value="external">External (gluetun / host VPN)</option>
+            </select>
+          </label>
+          <div id="vpn-config-area">
+            <label>Provider
+              <select id="vpn-provider"></select>
+            </label>
+            <div id="vpn-help" class="help"></div>
+
+            <div id="nordlynx-box" class="subcard" hidden>
+              <strong>NordLynx generator</strong>
+              <p class="muted small">Creates a WireGuard config from your NordVPN access token.</p>
+              <div class="row">
+                <input id="nord-token" type="password" placeholder="Access token">
+                <input id="nord-country" placeholder="Country (e.g. US, Germany)" style="max-width:200px">
+                <button class="btn" id="nord-gen">Generate</button>
+              </div>
+            </div>
+
+            <div data-mode="wireguard">
+              <label>WireGuard config
+                <textarea id="vpn-wg" rows="11" spellcheck="false" placeholder="[Interface]&#10;PrivateKey = …&#10;Address = 10.14.0.2/16&#10;DNS = 162.252.172.57&#10;&#10;[Peer]&#10;PublicKey = …&#10;Endpoint = us-nyc.prod.surfshark.com:51820&#10;AllowedIPs = 0.0.0.0/0"></textarea>
+              </label>
+              <label class="file-btn">Load .conf file<input type="file" id="vpn-wg-file" accept=".conf,.txt" hidden></label>
+            </div>
+            <div data-mode="openvpn">
+              <label>OpenVPN config
+                <textarea id="vpn-ovpn" rows="11" spellcheck="false" placeholder="client&#10;dev tun&#10;proto udp&#10;remote …&#10;&lt;ca&gt;…&lt;/ca&gt;"></textarea>
+              </label>
+              <label class="file-btn">Load .ovpn file<input type="file" id="vpn-ovpn-file" accept=".ovpn,.conf,.txt" hidden></label>
+              <div class="row">
+                <label class="grow">Service username<input id="vpn-user" autocomplete="off"></label>
+                <label class="grow">Service password<input id="vpn-pass" type="password" autocomplete="new-password"></label>
+              </div>
+            </div>
+            <div data-mode="tunnel">
+              <div class="row">
+                <label class="grow">DNS servers (optional)<input id="vpn-dns" placeholder="Use the VPN's DNS"></label>
+                <label class="grow">LAN bypass (CIDRs)<input id="vpn-lan" placeholder="192.168.1.0/24"></label>
+              </div>
+              <label class="check"><input type="checkbox" id="vpn-ks"> Kill switch — block all traffic when the VPN is down</label>
+              <label class="check"><input type="checkbox" id="vpn-auto"> Connect automatically on start / reconnect on failure</label>
+            </div>
+          </div>
+          <div id="vpn-external-help" class="help" hidden>
+            Run this container with <code>network_mode: service:gluetun</code> (see <code>docker-compose.gluetun.yml</code>) or on a host that is already on a VPN.
+            ai2vpn will not touch the network; it only shows the exit IP.
+          </div>
+          <div class="actions">
+            <button class="btn" id="vpn-save">Save</button>
+            <button class="btn primary" id="vpn-connect">Save &amp; connect</button>
+            <button class="btn danger" id="vpn-disconnect">Disconnect</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Status</h3>
+          <div id="vpn-status" class="status-grid"></div>
+          <div class="actions"><button class="btn small" id="vpn-refresh">Refresh exit IP</button></div>
+          <h4>Log</h4>
+          <pre id="vpn-log" class="log"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- API -->
+    <section data-view="api" hidden>
+      <div class="section-head">
+        <div>
+          <h2>API</h2>
+          <p class="muted">Every account is an OpenAI-compatible endpoint on this host. Use the account's key, or the master key with <code>model</code> set to the account's model name.</p>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Base URL</h3>
+        <div class="kv"><span>Base URL</span><code id="api-base" class="copyable"></code></div>
+        <div class="kv"><span>Master key</span><code id="api-master" class="copyable secret"></code>
+          <button class="btn small" id="rotate-master">Rotate</button></div>
+        <div class="kv"><span>OpenAPI</span><a id="api-spec" target="_blank"></a> · <a href="/docs" target="_blank">Swagger UI</a></div>
+      </div>
+      <div class="card">
+        <h3>Endpoints per account</h3>
+        <div class="table-wrap"><table class="table" id="api-table">
+          <thead><tr><th>Account</th><th>Model</th><th>Base URL</th><th>OpenAPI</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+      <div class="card">
+        <h3>Examples</h3>
+        <div class="code-tabs" id="code-tabs">
+          <button data-lang="curl" class="active">curl</button>
+          <button data-lang="python">Python</button>
+          <button data-lang="node">Node.js</button>
+        </div>
+        <pre class="code" id="code-example"></pre>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section data-view="settings" hidden>
+      <div class="section-head"><div><h2>Settings</h2></div></div>
+      <div class="two-col">
+        <div class="card">
+          <h3>General</h3>
+          <label>Public URL (how clients reach this container)
+            <input id="set-public" placeholder="auto-detected">
+          </label>
+          <p class="muted small" id="set-public-hint"></p>
+          <div class="row">
+            <label class="grow">Close idle browsers after (minutes, 0 = never)<input id="set-idle" type="number" min="0"></label>
+            <label class="grow">Request timeout (seconds)<input id="set-timeout" type="number" min="30" max="3600"></label>
+          </div>
+          <div class="actions"><button class="btn primary" id="set-save">Save</button></div>
+        </div>
+        <div class="card">
+          <h3>Admin password</h3>
+          <div id="pw-locked" class="notice" hidden>Set by the <code>ADMIN_PASSWORD</code> environment variable.</div>
+          <div id="pw-form">
+            <label>Current password<input id="pw-cur" type="password" autocomplete="current-password"></label>
+            <label>New password<input id="pw-new" type="password" autocomplete="new-password"></label>
+            <div class="actions"><button class="btn" id="pw-save">Change password</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Provider overrides</h3>
+        <p class="muted small">Chat sites change their HTML. Fix selectors here without rebuilding, or add a new site under a new id. JSON object keyed by provider id; fields are merged into the built-in definition.
+          <a href="#" id="show-builtin">Show a built-in definition</a></p>
+        <textarea id="set-overrides" rows="12" spellcheck="false" class="mono"></textarea>
+        <div class="actions"><button class="btn primary" id="overrides-save">Save overrides</button></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- Modals -->
+<div id="modal-root"></div>
+
+<template id="tpl-add-account">
+  <div class="modal-body">
+    <h3>Add account</h3>
+    <label>Service<div class="provider-picker" id="pp"></div></label>
+    <label>Name<input id="acc-name" placeholder="e.g. ChatGPT Plus (work)"></label>
+    <label>Model name / slug <span class="muted small">(used as <code>model</code> in API calls)</span><input id="acc-slug" placeholder="auto"></label>
+    <div class="actions right">
+      <button class="btn ghost" data-close>Cancel</button>
+      <button class="btn primary" id="acc-create">Create &amp; sign in</button>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-browser">
+  <div class="browser">
+    <div class="browser-bar">
+      <button class="icon-btn" data-act="back" title="Back">←</button>
+      <button class="icon-btn" data-act="forward" title="Forward">→</button>
+      <button class="icon-btn" data-act="reload" title="Reload">⟳</button>
+      <button class="icon-btn" data-act="home" title="Provider home">⌂</button>
+      <form class="url-form"><input class="url" spellcheck="false"></form>
+      <span class="tabs-info" title="Tabs (popups such as Google sign-in open as tabs)"></span>
+      <button class="icon-btn" data-act="tab" title="Next tab">⇥</button>
+      <button class="icon-btn" data-act="closetab" title="Close this tab">✕</button>
+    </div>
+    <div class="browser-screen" tabindex="0">
+      <canvas></canvas>
+      <div class="browser-overlay">Starting browser…</div>
+    </div>
+    <div class="browser-foot">
+      <form class="paste-form"><input placeholder="Type or paste text here and press Enter to send it to the page (passwords, codes…)" class="paste" autocomplete="off"></form>
+      <button class="btn" data-act="cookies">Import cookies</button>
+      <button class="btn primary" data-act="done">Done — check login</button>
+    </div>
+  </div>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>

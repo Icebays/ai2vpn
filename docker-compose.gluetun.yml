@@ -1,0 +1,39 @@
+# Alternative: let gluetun (https://github.com/qdm12/gluetun) own the VPN.
+# gluetun supports 30+ providers by name (Surfshark, NordVPN, Mullvad, ProtonVPN, PIA, ExpressVPN, …)
+# and ai2vpn shares its network namespace, so every browser request leaves through gluetun.
+#   docker compose -f docker-compose.gluetun.yml up -d
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    restart: unless-stopped
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    ports:
+      - "${AI2VPN_PORT:-8080}:8080"           # ai2vpn's web UI / API is published here
+    environment:
+      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-surfshark}   # nordvpn, mullvad, protonvpn, …
+      VPN_TYPE: ${VPN_TYPE:-wireguard}                           # or openvpn
+      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:-}
+      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:-}
+      OPENVPN_USER: ${OPENVPN_USER:-}
+      OPENVPN_PASSWORD: ${OPENVPN_PASSWORD:-}
+      SERVER_COUNTRIES: ${SERVER_COUNTRIES:-}
+      FIREWALL_INPUT_PORTS: "8080"            # let LAN clients reach ai2vpn through gluetun's firewall
+      TZ: ${TZ:-UTC}
+
+  ai2vpn:
+    build: .
+    image: ai2vpn:latest
+    container_name: ai2vpn
+    restart: unless-stopped
+    network_mode: "service:gluetun"
+    depends_on: [gluetun]
+    environment:
+      VPN_MODE: external                      # don't touch the network; just show the exit IP
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./data:/data
+    shm_size: 1gb

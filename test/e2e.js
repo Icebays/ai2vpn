@@ -1,0 +1,230 @@
+'use strict';
+/**
+ * End-to-end test: starts the server with a local mock chat site, logs an
+ * account in via cookie import, and calls the OpenAI-compatible API.
+ *   npm test
+ */
+const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const assert = require('assert');
+const WebSocket = require('ws');
+
+const PORT = 18000 + Math.floor(Math.random() * 1000);
+const BASE = `http://127.0.0.1:${PORT}`;
+const DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'a2v-test-'));
+
+let cookie = '';
+async function req(method, p, body, headers = {}) {
+  const r = await fetch(BASE + p, {
+    method,
+    headers: { 'content-type': 'application/json', cookie, ...headers },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const sc = r.headers.get('set-cookie');
+  if (sc) cookie = sc.split(';')[0];
+  const text = await r.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {}
+  return { status: r.status, json, text };
+}
+
+async function waitUp() {
+  for (let i = 0; i < 60; i++) {
+    try {
+      const r = await fetch(BASE + '/healthz');
+      if (r.ok) return;
+    } catch (e) {}
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error('server did not start');
+}
+
+async function main() {
+  const proc = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
+    env: { ...process.env, PORT: String(PORT), DATA_DIR: DATA, ADMIN_PASSWORD: 'test-pass', ENABLE_MOCK_PROVIDER: '1', HEADLESS: 'true', VPN_MODE: 'external' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let logs = '';
+  proc.stdout.on('data', (d) => (logs += d));
+  proc.stderr.on('data', (d) => (logs += d));
+  const step = (s) => console.log('  ✓', s);
+  try {
+    await waitUp();
+    assert.equal((await req('GET', '/api/accounts')).status, 401);
+    assert.equal((await req('POST', '/api/login', { password: 'nope' })).status, 401);
+    assert.equal((await req('POST', '/api/login', { password: 'test-pass' })).status, 200);
+    step('admin login');
+
+    const created = await req('POST', '/api/accounts', { provider: 'mock', name: 'Mock One' });
+    assert.equal(created.status, 200, created.text);
+    const acc = created.json;
+    assert.ok(acc.apiKey.startsWith('sk-a2v-'));
+    assert.equal(acc.slug, 'mock-one');
+    step('account created: ' + acc.slug);
+
+    let chk = await req('POST', `/api/accounts/${acc.id}/check`, {});
+    assert.equal(chk.json.loggedIn, false, JSON.stringify(chk.json));
+    step('logged-out state detected');
+
+    const noLogin = await req('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] }, { authorization: `Bearer ${acc.apiKey}` });
+    assert.equal(noLogin.status, 401, noLogin.text);
+    assert.equal(noLogin.json.error.code, 'not_logged_in');
+    step('API reports not_logged_in');
+
+    const imp = await req('POST', `/api/accounts/${acc.id}/cookies`, {
+      cookies: JSON.stringify([{ domain: '127.0.0.1', name: 'mock_auth', value: '1', path: '/', secure: false, hostOnly: true }]),
+    });
+    assert.equal(imp.json.imported, 1, imp.text);
+    chk = await req('POST', `/api/accounts/${acc.id}/check`, {});
+    assert.equal(chk.json.loggedIn, true, JSON.stringify(chk.json));
+    step('cookie import → logged in');
+
+    const bad = await req('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] }, { authorization: 'Bearer sk-wrong' });
+    assert.equal(bad.status, 401);
+    step('bad key rejected');
+
+    const models = await req('GET', '/v1/models', null, { authorization: `Bearer ${acc.apiKey}` });
+    assert.deepEqual(models.json.data.map((m) => m.id), ['mock-one']);
+    step('/v1/models');
+
+    const t0 = Date.now();
+    const r1 = await req('POST', '/v1/chat/completions', { model: 'mock-one', messages: [{ role: 'user', content: 'ping <b>one</b>' }] }, { authorization: `Bearer ${acc.apiKey}` });
+    assert.equal(r1.status, 200, r1.text);
+    const content = r1.json.choices[0].message.content;
+    assert.ok(content.includes('Hello from the **mock** model. You said: ping <b>one</b>'), content);
+    assert.ok(content.includes('- one\n- two'), content);
+    assert.ok(content.includes('```js\nconsole.log(1 < 2);\n```'), content);
+    step(`non-streaming completion (${Date.now() - t0} ms)`);
+
+    // streaming, via per-account URL + master key
+    const settings = await req('GET', '/api/settings');
+    const master = settings.json.masterKey;
+    const r = await fetch(`${BASE}/acc/mock-one/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${master}` },
+      body: JSON.stringify({
+        stream: true,
+        stream_options: { include_usage: true },
+        messages: [
+          { role: 'system', content: 'Be brief.' },
+          { role: 'user', content: 'first' },
+          { role: 'assistant', content: 'ok' },
+          { role: 'user', content: 'second question' },
+        ],
+      }),
+    });
+    assert.equal(r.status, 200);
+    assert.ok(r.headers.get('content-type').includes('text/event-stream'));
+    const raw = await r.text();
+    const events = raw.split('\n').filter((l) => l.startsWith('data: ')).map((l) => l.slice(6));
+    assert.equal(events[events.length - 1], '[DONE]');
+    const chunks = events.slice(0, -1).map((e) => JSON.parse(e));
+    const deltas = chunks.filter((c) => c.choices && c.choices[0] && c.choices[0].delta.content).length;
+    const streamed = chunks.map((c) => (c.choices[0] && c.choices[0].delta.content) || '').join('');
+    assert.ok(deltas > 3, 'expected several deltas, got ' + deltas);
+    assert.ok(streamed.includes('[System]') && streamed.includes('second question'), streamed);
+    assert.ok(chunks.some((c) => c.usage), 'usage chunk');
+    assert.ok(chunks.some((c) => c.choices[0] && c.choices[0].finish_reason === 'stop'));
+    step(`streaming completion with history (${deltas} deltas)`);
+
+    const routed = await req('POST', '/v1/chat/completions', { model: 'mock-one', messages: [{ role: 'user', content: 'routed' }] }, { authorization: `Bearer ${master}` });
+    assert.equal(routed.status, 200, routed.text);
+    const unknown = await req('POST', '/v1/chat/completions', { model: 'nope', messages: [{ role: 'user', content: 'x' }] }, { authorization: `Bearer ${master}` });
+    assert.equal(unknown.status, 404);
+    step('master key routes by model');
+
+    // concurrent requests are queued per account
+    const both = await Promise.all(
+      ['alpha', 'beta'].map((w) => req('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: w }] }, { authorization: `Bearer ${acc.apiKey}` }))
+    );
+    assert.ok(both[0].json.choices[0].message.content.includes('alpha'));
+    assert.ok(both[1].json.choices[0].message.content.includes('beta'));
+    step('concurrent requests serialized');
+
+    const spec = await req('GET', '/acc/mock-one/openapi.json');
+    assert.equal(spec.json.openapi, '3.1.0');
+    assert.equal(spec.json.servers[0].url, `${BASE}/acc/mock-one/v1`);
+    assert.ok(spec.json.paths['/chat/completions'].post);
+    step('OpenAPI spec');
+
+    // remote viewer websocket
+    await new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws/viewer/${acc.id}`, { headers: { cookie } });
+      let gotFrame = false;
+      let gotMeta = false;
+      const t = setTimeout(() => reject(new Error('no frame from viewer')), 15000);
+      ws.on('message', (data, isBinary) => {
+        if (isBinary) gotFrame = data.length > 1000 && data[0] === 0xff && data[1] === 0xd8; // JPEG
+        else if (JSON.parse(data.toString()).type === 'meta') gotMeta = true;
+        if (gotFrame && gotMeta) {
+          ws.send(JSON.stringify({ type: 'mousemove', x: 10, y: 10 }));
+          clearTimeout(t);
+          ws.close();
+          resolve();
+        }
+      });
+      ws.on('error', reject);
+    });
+    const unauth = await new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws/viewer/${acc.id}`);
+      ws.on('error', () => resolve(true));
+      ws.on('open', () => resolve(false));
+    });
+    assert.ok(unauth, 'viewer must require admin session');
+    step('remote browser viewer streams JPEG frames');
+
+    // ---- direct login (email/password, emailed code, TOTP, auto re-login) ----
+    const { totp } = require('../src/login');
+    assert.equal(totp('GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ', 30, 8, 59000), '94287082'); // RFC 6238 vector
+    const mk = async (name) => (await req('POST', '/api/accounts', { provider: 'mock', name })).json;
+    const a2 = await mk('Direct');
+    let lg = await req('POST', `/api/accounts/${a2.id}/login`, { email: 'user@example.com', password: 'hunter2' });
+    assert.equal(lg.json.loggedIn, true, lg.text);
+    step('direct login: email + password');
+
+    const a3 = await mk('Emailed code');
+    lg = await req('POST', `/api/accounts/${a3.id}/login`, { email: '2fa@example.com', password: 'hunter2' });
+    assert.equal(lg.json.loggedIn, false, lg.text);
+    assert.equal(lg.json.codeRequested, true, lg.text);
+    lg = await req('POST', `/api/accounts/${a3.id}/login`, { code: '123456' });
+    assert.equal(lg.json.loggedIn, true, lg.text);
+    step('direct login: verification code step');
+
+    const a4 = await mk('TOTP');
+    lg = await req('POST', `/api/accounts/${a4.id}/login`, { email: '2fa@example.com', password: 'hunter2', totpSecret: 'JBSWY3DPEHPK3PXP', remember: true });
+    assert.equal(lg.json.loggedIn, true, lg.text);
+    assert.equal(lg.json.account.credentials.email, '2fa@example.com');
+    assert.equal(lg.json.account.credentials.password, undefined, 'password must not be returned');
+    step('direct login: automatic TOTP + saved credentials');
+
+    await req('POST', `/api/accounts/${a4.id}/reset-profile`, {});
+    const relog = await req('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'after expiry' }] }, { authorization: `Bearer ${a4.apiKey}` });
+    assert.equal(relog.status, 200, relog.text);
+    assert.ok(relog.json.choices[0].message.content.includes('after expiry'));
+    step('expired session → automatic re-login → request succeeds');
+
+    const vpn = await req('GET', '/api/vpn');
+    assert.ok(vpn.json.status && vpn.json.presets.length > 5);
+    step('VPN status endpoint (capable=' + vpn.json.status.capable + ')');
+
+    const html = await (await fetch(BASE + '/')).text();
+    assert.ok(html.includes('ai2vpn'));
+    step('web UI served');
+
+    console.log('\nAll tests passed.');
+  } catch (e) {
+    console.error('\nTEST FAILED:', e.message);
+    console.error('--- server log ---\n' + logs.slice(-4000));
+    process.exitCode = 1;
+  } finally {
+    proc.kill('SIGTERM');
+    await new Promise((r) => setTimeout(r, 1500));
+    fs.rmSync(DATA, { recursive: true, force: true });
+  }
+}
+
+main();

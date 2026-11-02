@@ -1,0 +1,27 @@
+# ai2vpn — the container runs the VPN itself (WireGuard / OpenVPN, configured in the web UI).
+#   docker compose up -d   →   open http://<host>:8080
+services:
+  ai2vpn:
+    build: .
+    image: ai2vpn:latest
+    container_name: ai2vpn
+    restart: unless-stopped
+    ports:
+      - "${AI2VPN_PORT:-8080}:8080"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}      # empty → a password is generated and printed in the logs
+      PUBLIC_URL: ${PUBLIC_URL:-}              # e.g. https://ai.example.com (shown as the API base URL)
+      TZ: ${TZ:-UTC}
+      # VPN_MODE: external                     # set when the network is handled by gluetun / the host
+    volumes:
+      - ./data:/data                           # accounts, browser profiles (logins), VPN config
+    cap_add:
+      - NET_ADMIN                              # needed to bring up the VPN + kill switch
+    devices:
+      - /dev/net/tun:/dev/net/tun              # needed for OpenVPN
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+      # IPv6 leaks are blocked by ai2vpn's firewall; optionally also disable IPv6 entirely
+      # (only on hosts that have IPv6 enabled — the container fails to start otherwise):
+      # - net.ipv6.conf.all.disable_ipv6=1
+    shm_size: 1gb                              # Chromium needs more than Docker's 64 MB default

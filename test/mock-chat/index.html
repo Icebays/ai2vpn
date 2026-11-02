@@ -1,0 +1,70 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Mock Chat</title>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 20px; background: #f6f6f6; }
+  .msg { padding: 10px; margin: 8px 0; border-radius: 8px; background: #fff; }
+  .user { background: #dbeafe; }
+  #composer:not([hidden]) { display: flex; gap: 8px; margin-top: 20px; }
+  textarea { flex: 1; height: 60px; }
+</style>
+</head>
+<body>
+<h1>Mock Chat</h1>
+<div id="auth"></div>
+<div id="log"></div>
+<div id="composer" hidden>
+  <textarea id="prompt" placeholder="Message"></textarea>
+  <button id="send">Send</button>
+  <button id="stop" hidden>Stop</button>
+</div>
+<script>
+  const loggedIn = document.cookie.includes('mock_auth=1');
+  const auth = document.getElementById('auth');
+  if (!loggedIn) {
+    auth.innerHTML = '<button id="login">Log in</button>';
+    document.getElementById('login').onclick = () => { document.cookie = 'mock_auth=1; path=/'; location.reload(); };
+  } else {
+    auth.textContent = 'Logged in as tester';
+    document.getElementById('composer').hidden = false;
+  }
+  const log = document.getElementById('log');
+  const prompt = document.getElementById('prompt');
+  const stop = document.getElementById('stop');
+  let stopped = false;
+  stop.onclick = () => { stopped = true; };
+  async function send() {
+    const text = prompt.value.trim();
+    if (!text) return;
+    prompt.value = '';
+    const u = document.createElement('div');
+    u.className = 'msg user';
+    u.textContent = text;
+    log.appendChild(u);
+    await new Promise(r => setTimeout(r, 400));
+    const a = document.createElement('div');
+    a.className = 'msg assistant';
+    a.innerHTML = '<div class="md"></div><button>Copy</button>';
+    log.appendChild(a);
+    const md = a.querySelector('.md');
+    stop.hidden = false;
+    stopped = false;
+    const words = ('Hello from the **mock** model. You said: ' + text.slice(0, 2000).replace(/\s+/g, ' ')).split(' ');
+    let html = '';
+    for (const w of words) {
+      if (stopped) break;
+      html += (html ? ' ' : '') + w.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      md.innerHTML = '<p>' + html + '</p>';
+      await new Promise(r => setTimeout(r, 25));
+    }
+    md.innerHTML += '<ul><li>one</li><li>two</li></ul><pre><code class="language-js">console.log(1 &lt; 2);\n</code></pre>';
+    await new Promise(r => setTimeout(r, 300));
+    stop.hidden = true;
+  }
+  document.getElementById('send').onclick = send;
+  prompt.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+</script>
+</body>
+</html>

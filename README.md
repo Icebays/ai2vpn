@@ -1,0 +1,128 @@
+# ai2vpn
+
+A self-hosted Docker container that:
+
+1. **Signs in to your own AI chat accounts**: ChatGPT, Claude, Gemini, Kimi, DeepSeek, Grok, Qwen, Le Chat (Mistral), or any other chat site you configure. Each account gets its own real Chromium profile inside the container.
+2. **Sends all of that traffic through a VPN** (Surfshark, NordVPN, Mullvad, Proton VPN, PIA, ExpressVPN, Windscribe, IVPN, CyberGhost, or any WireGuard/OpenVPN server). It has a kill switch and blocks IPv6 leaks.
+3. **Turns each account into an OpenAI-compatible API** served by the container host (`http://<host>:8080/v1`). Each account has its own API key and its own OpenAPI spec.
+
+You manage everything from the web interface: adding accounts, signing in, the VPN, API keys, and site selectors.
+
+```
+ your apps (OpenAI SDK, curl, …)            ┌──────────────── ai2vpn container ─────────────────┐
+ ───────────────────────────────▶ :8080 ──▶ │  /v1/chat/completions  → account (by API key)      │
+   Authorization: Bearer sk-a2v-…           │        │                                           │
+                                            │        ▼                                           │
+ web UI (browser) ───────────────▶ :8080 ──▶│  Chromium profile per account (chatgpt.com, …)     │
+                                            │        │                                           │
+                                            │        ▼  wg0 / tun0 (kill switch)                 │
+                                            └────────┼───────────────────────────────────────────┘
+                                                     ▼
+                                                VPN provider ──▶ chatgpt.com / claude.ai / …
+```
+
+## Quick start
+
+```bash
+git clone https://github.com/icebays/ai2vpn && cd ai2vpn
+```
+
+```bash
+cp .env.example .env    # set ADMIN_PASSWORD
+```
+
+```bash
+docker compose up -d --build
+```
+
+Open `http://<host>:8080`, sign in with `ADMIN_PASSWORD`, and then:
+
+1. **VPN tab**: pick WireGuard or OpenVPN and your provider. Follow the instructions shown for that provider, paste or load the config, then click **Save & connect**. The pill at the top shows the container's exit IP.
+2. **Accounts tab**: click **+ Add account**, pick the service, then sign in:
+   - **Direct login**: enter your email and password, plus a 2FA secret if you use one. The container opens the real sign-in page and fills it in step by step (email → password → code). If you save the credentials, it signs in again automatically when the session expires.
+   - **Remote browser**: the account's Chromium appears live in your browser. Sign in by hand, which works for Google sign-in, passkeys and captchas. Popups such as "Sign in with Google" open as tabs.
+   - **Import cookies**: paste cookies exported from your own browser (Cookie-Editor JSON, cookies.txt, or a `Cookie:` header).
+3. Copy the account's **Base URL**, **Model** and **API key**, or use the **Test** button.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://<host>:8080/v1", api_key="sk-a2v-…")   # the account's key
+r = client.chat.completions.create(model="chatgpt", messages=[{"role": "user", "content": "Hello"}])
+print(r.choices[0].message.content)
+```
+
+## API
+
+| Endpoint | Description |
+|---|---|
+| `POST /v1/chat/completions` | OpenAI Chat Completions. Supports `stream: true` (SSE) and `stream_options.include_usage`. |
+| `GET /v1/models` | One model per account (the account's slug). |
+| `/acc/<slug>/v1/...` | The same endpoints pinned to one account. |
+| `GET /acc/<slug>/openapi.json` | OpenAPI 3.1 spec for that account. Swagger UI is at `/acc/<slug>/docs`. |
+| `GET /v1/openapi.json`, `/docs` | Spec covering all accounts. |
+
+**Keys.** Each account has its own key (`sk-a2v-…`), and the key decides which account answers. The **master key** (API tab) works for every account: set `model` to the account slug or to a provider id such as `claude`.
+
+**How a request runs.** Each request opens a fresh chat in the web UI and types the prompt. For multi-turn requests, the earlier messages are replayed in the prompt as a transcript. Requests to the same account are queued (one at a time per account); different accounts run in parallel. Token usage is estimated at 4 characters per token.
+
+For ChatGPT, a `model` value that isn't an alias (for example `gpt-5`) is passed to `chatgpt.com/?model=…`.
+
+## VPN
+
+Two ways to run the VPN:
+
+| | How | When |
+|---|---|---|
+| **Built-in** (default `docker-compose.yml`) | Paste a WireGuard `.conf` or OpenVPN `.ovpn` in the web UI. The container brings up `wg0`/`tun0` itself. Needs `NET_ADMIN` and `/dev/net/tun`. | You want to switch servers and providers from the UI. |
+| **gluetun** (`docker-compose.gluetun.yml`) | [gluetun](https://github.com/qdm12/gluetun) owns the VPN, and ai2vpn shares its network (`VPN_MODE=external`). | You already use gluetun, or want its provider catalogue and server picking. |
+
+Details of the built-in mode:
+
+- **Inbound access stays up.** New connections arriving on `eth0` are marked (connmark), and their replies go back out `eth0` through a separate routing table. The web UI and API stay reachable from your LAN or reverse proxy while all outbound traffic uses the tunnel.
+- **Kill switch** (optional). An iptables chain rejects any outbound traffic that is not going through the tunnel, to the local subnet, or to `LAN bypass` CIDRs. This holds while the VPN is down too.
+- **IPv6.** The tunnels carry IPv4 only, so new outbound IPv6 is rejected whenever a tunnel mode is selected.
+- **DNS.** Uses the VPN's DNS servers (from the WireGuard config or pushed by OpenVPN), or the servers you enter.
+- **Auto-reconnect** when the tunnel process dies.
+- **NordVPN WireGuard (NordLynx).** Nord does not hand out `.conf` files. Paste your access token in the generator and ai2vpn builds the config through Nord's API.
+- **WireGuard needs the `wireguard` kernel module on the host.** It is built into Linux 5.6+ and Docker Desktop. If yours lacks it, use OpenVPN or gluetun.
+
+## When a site changes its HTML
+
+Chat sites change their markup often. Every provider is described by CSS selectors: prompt box, send button, the "generating" indicator, assistant messages, and the logged-out marker. You can override any of them under **Settings → Provider overrides** without rebuilding, or for a single account under **More → advanced settings**. The **Custom site** provider lets you add any other chat site the same way. The fields are documented at the top of `src/providers.js`.
+
+## Configuration
+
+| Env var | Default | |
+|---|---|---|
+| `ADMIN_PASSWORD` | generated, printed in the logs | Web UI password |
+| `PUBLIC_URL` | taken from the request | Base URL shown for the API, e.g. `https://ai.example.com` |
+| `PORT` | `8080` | |
+| `HEADLESS` | `false` | `false` runs Chromium headed on a virtual display (Xvfb), which sites flag as a bot less often |
+| `VPN_MODE` | (set in the UI) | Set to `external` when gluetun or the host handles the VPN |
+| `TZ`, `BROWSER_LOCALE` | `UTC`, `en-US` | Browser timezone and locale |
+| `MAX_QUEUE` | `20` | Maximum queued requests per account |
+
+Everything is stored in `/data` (`./data` on the host): `config.json` (accounts, keys, VPN settings, saved sign-ins), `profiles/<id>` (browser profiles, i.e. your logged-in sessions), and `vpn/`. **Treat this folder as a secret.**
+
+## Development
+
+```bash
+npm install
+```
+
+```bash
+npm test           # end-to-end test against a local mock chat site (headless Chromium)
+```
+
+```bash
+ADMIN_PASSWORD=dev HEADLESS=true npm start
+```
+
+## Notes and limits
+
+- **Use your own accounts.** Driving a consumer chat UI through automation can be against a provider's terms of service, and providers may rate-limit, challenge or suspend accounts. The official APIs are the supported route for production workloads. You are responsible for how you use this.
+- **Text only.** Images and file uploads, tool or function calling, and sampling parameters (`temperature`, …) are ignored.
+- **Captchas, email codes and passkeys** can't be completed automatically. Direct login stops and asks you to finish in the remote browser, or to type the code into the dialog.
+- **Google often blocks sign-in from automated browsers.** If Gemini's sign-in is rejected, use **Import cookies**.
+- **Do not expose port 8080 to the internet without TLS.** Put it behind a reverse proxy (Caddy, Traefik, nginx) with HTTPS. Anyone with the admin password controls your accounts.
