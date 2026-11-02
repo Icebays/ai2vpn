@@ -116,7 +116,9 @@ function pageSnapshot(sel) {
       .trim();
   }
 
-  const msgs = qAll(sel.assistant);
+  let msgs = qAll(sel.assistant);
+  // With several selectors, a reply can match at multiple nesting levels: keep the outermost.
+  msgs = msgs.filter((m) => !msgs.some((o) => o !== m && o.contains(m)));
   const last = msgs[msgs.length - 1];
   let text = '';
   if (last) {

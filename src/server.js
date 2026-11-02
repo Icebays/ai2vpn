@@ -98,6 +98,7 @@ function accountView(a, req) {
     running: browsers.isRunning(a.id),
     credentials: a.credentials ? { email: a.credentials.email, totp: !!a.credentials.totpSecret, autoRelogin: a.credentials.autoRelogin !== false } : null,
     lastCheck: a.lastCheck || null,
+    debugAt: a.debugAt || null,
     stats: a.stats || { requests: 0, errors: 0 },
     endpoints: {
       base: `${base}/v1`,
@@ -252,6 +253,17 @@ admin.delete(
     res.json(accountView(a, req));
   })
 );
+
+// Screenshot / HTML of the page from the last failed request.
+admin.get('/accounts/:id/debug.:ext(png|html)', (req, res) => {
+  const a = store.account(req.params.id);
+  if (!a) return res.status(404).json({ error: 'Account not found' });
+  const file = path.join(store.dir, 'debug', `${a.id}.${req.params.ext}`);
+  if (!require('fs').existsSync(file)) return res.status(404).json({ error: 'No debug capture yet' });
+  res.setHeader('Cache-Control', 'no-store');
+  if (req.params.ext === 'html') res.type('text/plain'); // show the source, don't render it
+  res.sendFile(file);
+});
 
 admin.post(
   '/accounts/:id/close',

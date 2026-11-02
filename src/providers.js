@@ -55,9 +55,9 @@ const BUILTIN = {
     selectors: {
       input: 'div[contenteditable="true"].ProseMirror, div[contenteditable="true"]',
       send: 'button[aria-label="Send message"], button[aria-label="Send Message"]',
-      busy: 'button[aria-label="Stop response"], [data-is-streaming="true"]',
-      assistant: '.font-claude-response, .font-claude-message',
-      content: '',
+      busy: 'button[aria-label="Stop response"], button[aria-label="Stop Response"], [data-is-streaming="true"]',
+      assistant: 'div[data-is-streaming], .font-claude-response, .font-claude-message',
+      content: '.standard-markdown, .progressive-markdown, .font-claude-response, .font-claude-message',
       exclude: 'button, details, [class*="thinking"]',
       loggedOut: 'a[href="/login"], button[data-testid="login-button"]',
     },

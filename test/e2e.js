@@ -73,7 +73,10 @@ async function main() {
     const noLogin = await req('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] }, { authorization: `Bearer ${acc.apiKey}` });
     assert.equal(noLogin.status, 401, noLogin.text);
     assert.equal(noLogin.json.error.code, 'not_logged_in');
-    step('API reports not_logged_in');
+    const shot = await fetch(`${BASE}/api/accounts/${acc.id}/debug.png`, { headers: { cookie } });
+    assert.equal(shot.status, 200);
+    assert.equal(shot.headers.get('content-type'), 'image/png');
+    step('API reports not_logged_in (+ debug screenshot saved)');
 
     const imp = await req('POST', `/api/accounts/${acc.id}/cookies`, {
       cookies: JSON.stringify([{ domain: '127.0.0.1', name: 'mock_auth', value: '1', path: '/', secure: false, hostOnly: true }]),
@@ -144,6 +147,14 @@ async function main() {
     assert.ok(both[0].json.choices[0].message.content.includes('alpha'));
     assert.ok(both[1].json.choices[0].message.content.includes('beta'));
     step('concurrent requests serialized');
+
+    // outdated reply selector → generic reply detection still finds the answer
+    await req('PATCH', `/api/accounts/${acc.id}`, { override: { selectors: { assistant: '.selector-that-no-longer-exists' } } });
+    const fb = await req('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'fallback check' }] }, { authorization: `Bearer ${acc.apiKey}` });
+    assert.equal(fb.status, 200, fb.text);
+    assert.ok(fb.json.choices[0].message.content.includes('You said: fallback check'), fb.json.choices[0].message.content);
+    await req('PATCH', `/api/accounts/${acc.id}`, { override: null });
+    step('outdated reply selector → generic fallback');
 
     const spec = await req('GET', '/acc/mock-one/openapi.json');
     assert.equal(spec.json.openapi, '3.1.0');

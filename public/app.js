@@ -145,6 +145,7 @@ function renderAccounts() {
       </div>
       <div class="acc-stats">${a.stats.requests || 0} requests · ${a.stats.errors || 0} errors · last used ${timeAgo(a.stats.lastUsed)}</div>
       ${a.stats.lastError ? `<div class="acc-error" title="${esc(a.stats.lastError)}">${esc(a.stats.lastError)}</div>` : ''}
+      ${a.debugAt ? `<div class="acc-stats">Last failure (${timeAgo(a.debugAt)}): <a href="/api/accounts/${a.id}/debug.png" target="_blank">screenshot</a> · <a href="/api/accounts/${a.id}/debug.html" target="_blank">page HTML</a></div>` : ''}
       <div class="actions">
         <button class="btn primary small" data-act="login">Sign in</button>
         <button class="btn small" data-act="browser">Open browser</button>
@@ -427,7 +428,9 @@ function openPlayground(a) {
     <h3>Test — ${esc(a.name)}</h3>
     <label>Prompt<textarea id="pg-in">Say hello and tell me which model you are in one sentence.</textarea></label>
     <label class="check"><input type="checkbox" id="pg-stream" checked> Stream</label>
-    <div class="actions"><button class="btn primary" id="pg-go">Send</button><span class="muted small" id="pg-time"></span></div>
+    <div class="actions" style="align-items:center"><button class="btn primary" id="pg-go">Send</button>
+      <button class="btn" id="pg-watch" title="See the account's browser while it answers">Watch live</button>
+      <span class="muted small" id="pg-time"></span></div>
     <h4>Response</h4><div class="out" id="pg-out"></div>
     <h4>curl</h4><pre class="code" id="pg-curl"></pre>
     <div class="actions right"><button class="btn ghost" data-close>Close</button></div></div>`, { onClose: () => ctl && ctl.abort() });
@@ -435,10 +438,17 @@ function openPlayground(a) {
   const curl = () => `curl ${a.endpoints.base}/chat/completions \\\n  -H "Authorization: Bearer ${a.apiKey}" \\\n  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify({ model: a.slug, messages: [{ role: 'user', content: $('#pg-in', m.el).value }] }).replace(/'/g, "'\\''")}'`;
   $('#pg-curl', m.el).textContent = curl();
   $('#pg-in', m.el).addEventListener('input', () => ($('#pg-curl', m.el).textContent = curl()));
+  $('#pg-watch', m.el).onclick = () => openBrowser(a);
   $('#pg-go', m.el).onclick = async () => {
     const out = $('#pg-out', m.el);
     const go = $('#pg-go', m.el);
     out.textContent = '';
+    let got = false;
+    const waiting = document.createElement('span');
+    waiting.className = 'muted';
+    waiting.textContent = `Waiting for ${a.providerName} to answer… (click "Watch live" to see the browser)`;
+    out.appendChild(waiting);
+    const write = (t) => { if (!got) { got = true; out.textContent = ''; } out.textContent += t; out.scrollTop = out.scrollHeight; };
     go.disabled = true;
     const t0 = Date.now();
     const timer = setInterval(() => ($('#pg-time', m.el).textContent = `${((Date.now() - t0) / 1000).toFixed(1)}s`), 100);
@@ -453,7 +463,7 @@ function openPlayground(a) {
       });
       if (!stream) {
         const j = await r.json();
-        out.textContent = j.error ? '⚠ ' + j.error.message : j.choices[0].message.content;
+        write(j.error ? '⚠ ' + j.error.message : j.choices[0].message.content);
       } else {
         const reader = r.body.getReader();
         const dec = new TextDecoder();
@@ -466,13 +476,14 @@ function openPlayground(a) {
           for (const l of lines) {
             if (!l.startsWith('data: ') || l === 'data: [DONE]') continue;
             const j = JSON.parse(l.slice(6));
-            if (j.error) out.textContent += '\n⚠ ' + j.error.message;
+            if (j.error) write((got ? '\n' : '') + '⚠ ' + j.error.message);
             const d = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content;
-            if (d) { out.textContent += d; out.scrollTop = out.scrollHeight; }
+            if (d) write(d);
           }
         }
       }
-    } catch (e) { if (e.name !== 'AbortError') out.textContent += '\n⚠ ' + e.message; }
+    } catch (e) { if (e.name !== 'AbortError') write('⚠ ' + e.message); }
+    if (!got) write('⚠ Empty response.');
     clearInterval(timer);
     go.disabled = false;
     loadAccounts();

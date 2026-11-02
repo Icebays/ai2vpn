@@ -39,7 +39,7 @@ class ChatError extends Error {
  */
 async function runChat({ browsers, store, account, prompt, model, onDelta, signal, timeoutMs }) {
   const provider = resolveProvider(store, account);
-  const sel = { ...provider.selectors, loggedOutUrl: provider.loggedOutUrl };
+  let sel = { ...provider.selectors, loggedOutUrl: provider.loggedOutUrl };
   if (!sel.input || !sel.assistant) throw new ChatError('Provider is missing input/assistant selectors', 500, 'config_error');
   const page = await browsers.getPage(account);
   browsers.setBusy(account.id, true);
@@ -75,6 +75,9 @@ async function runChat({ browsers, store, account, prompt, model, onDelta, signa
     await submit(page, input, sel);
 
     // Wait for the reply to appear.
+    log(account, 'prompt sent, waiting for the reply');
+    const genericSel = { ...sel, assistant: GENERIC_ASSISTANT, content: '' };
+    const genBefore = await page.evaluate(pageSnapshot, genericSel).catch(() => null);
     const startDeadline = Date.now() + 90000;
     const hardDeadline = Date.now() + (timeoutMs || 300000);
     let snap = before;
@@ -85,15 +88,31 @@ async function runChat({ browsers, store, account, prompt, model, onDelta, signa
       await sleep(300);
       snap = await page.evaluate(pageSnapshot, sel).catch(() => snap);
       if (snap.count > before.count || (snap.text && snap.text !== before.text)) break;
-      if (snap.busy) continue;
-      if (!resent && Date.now() - t0 > 6000) {
+      // The configured reply selector may be outdated: after a while, look for a reply generically.
+      if (genBefore && Date.now() - t0 > 8000) {
+        const g = await page.evaluate(pageSnapshot, genericSel).catch(() => null);
+        if (g && g.count > genBefore.count && g.text && !isEcho(g.text, prompt)) {
+          log(account, `reply selector "${sel.assistant}" matched nothing — using generic reply detection. Update the selectors in Settings → Provider overrides.`);
+          sel = genericSel;
+          snap = g;
+          break;
+        }
+      }
+      if (!resent && !snap.busy && Date.now() - t0 > 6000) {
         // The click may not have registered: try Enter once.
         resent = true;
         const still = await input.evaluate((el) => (el.value !== undefined ? el.value : el.innerText).trim().length).catch(() => 0);
         if (still > 0) await input.press('Enter').catch(() => {});
       }
-      if (Date.now() > startDeadline) throw new ChatError('Timed out waiting for the reply to start', 504, 'timeout');
+      if (Date.now() > startDeadline) {
+        throw new ChatError(
+          `No reply detected within 90s on ${page.url()} (reply selector: ${sel.assistant}). Open the account's browser in the web UI to see the page; a debug screenshot was saved.`,
+          504,
+          'timeout'
+        );
+      }
     }
+    log(account, 'reply started');
 
     // Stream until the reply is stable and nothing indicates it's still generating.
     let emitted = '';
@@ -135,10 +154,50 @@ async function runChat({ browsers, store, account, prompt, model, onDelta, signa
       if (rest && onDelta) onDelta(rest);
     }
     if (!final.trim()) throw new ChatError('Empty reply from provider', 502, 'empty_reply');
+    log(account, `reply finished (${final.length} chars)`);
     return final;
+  } catch (e) {
+    if (e.code !== 'aborted') await saveDebug(store, account, page, e).catch(() => {});
+    throw e;
   } finally {
     browsers.setBusy(account.id, false);
   }
+}
+
+// Typical reply containers across chat sites; used when the configured selector finds nothing.
+const GENERIC_ASSISTANT = [
+  '[data-message-author-role="assistant"]',
+  'div[data-is-streaming]',
+  '.font-claude-response',
+  '.font-claude-message',
+  'model-response',
+  '.ds-markdown',
+  '.markdown',
+  '.prose',
+  '[class*="markdown"]',
+  '[class*="assistant"]',
+].join(', ');
+
+function isEcho(text, prompt) {
+  const a = text.replace(/\s+/g, ' ').trim();
+  const b = String(prompt).replace(/\s+/g, ' ').trim();
+  return !a || a === b || (a.length > 20 && b.includes(a));
+}
+
+function log(account, msg) {
+  console.log(`[chat] ${account.slug}: ${msg}`);
+}
+
+/** Keep a screenshot + HTML of the page from the last failed request (shown in the web UI). */
+async function saveDebug(store, account, page, err) {
+  const fs = require('fs');
+  const path = require('path');
+  const dir = path.join(store.dir, 'debug');
+  fs.mkdirSync(dir, { recursive: true });
+  await page.screenshot({ path: path.join(dir, `${account.id}.png`), timeout: 10000 });
+  const html = await page.content().catch(() => '');
+  fs.writeFileSync(path.join(dir, `${account.id}.html`), `<!-- ${new Date().toISOString()} ${String(err.message).replace(/--/g, '-')} -->\n${html}`);
+  account.debugAt = Date.now();
 }
 
 function isAlias(model, account, provider) {
