@@ -108,7 +108,15 @@ function pageSnapshot(sel) {
   }
 
   function toMarkdown(el) {
+    // Clone, then drop anything not rendered (collapsed "thinking" panels, hidden status text…).
     const clone = el.cloneNode(true);
+    const orig = [el, ...el.querySelectorAll('*')];
+    const copy = [clone, ...clone.querySelectorAll('*')];
+    const hidden = [];
+    for (let i = 1; i < orig.length; i++) {
+      if (orig[i].checkVisibility && !orig[i].checkVisibility()) hidden.push(copy[i]);
+    }
+    hidden.forEach((n) => n.remove());
     if (sel.exclude) qAll(sel.exclude, clone).forEach((n) => n.remove());
     return md(clone, { pre: false, depth: 0 })
       .replace(/[ \t]+\n/g, '\n')
@@ -121,11 +129,15 @@ function pageSnapshot(sel) {
   msgs = msgs.filter((m) => !msgs.some((o) => o !== m && o.contains(m)));
   const last = msgs[msgs.length - 1];
   let text = '';
+  // matched=false: the answer area isn't there yet (only status text like "Thinking…").
+  let matched = !sel.content;
   if (last) {
     let parts = sel.content ? qAll(sel.content, last) : [];
     // keep only outermost matches
     parts = parts.filter((p) => !parts.some((o) => o !== p && o.contains(p)));
-    if (!parts.length) parts = [last];
+    if (parts.length) matched = true;
+    else parts = [last];
+    if (sel.contentPick === 'last' && parts.length > 1) parts = parts.slice(-1);
     text = parts.map(toMarkdown).filter(Boolean).join('\n\n');
   }
   let loggedOut = false;
@@ -138,6 +150,7 @@ function pageSnapshot(sel) {
   return {
     count: msgs.length,
     text,
+    matched,
     busy: sel.busy ? anyVisible(sel.busy) : false,
     hasInput: anyVisible(sel.input),
     loggedOut,

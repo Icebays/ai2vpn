@@ -15,6 +15,7 @@
  *   assistant  one element per assistant reply; the last one is read
  *   content    (optional) the part of a reply that holds the answer text
  *   exclude    (optional) elements to drop from a reply (thinking, buttons…)
+ *   contentPick (optional) "last" = use only the last `content` match of a reply
  *   loggedOut  (optional) element visible only when NOT logged in
  * loggedOutUrl  (optional) regex; when the page URL matches, you're logged out
  * loginUrl      (optional) where "Direct login" starts (defaults to homeUrl)
@@ -57,7 +58,8 @@ const BUILTIN = {
       send: 'button[aria-label="Send message"], button[aria-label="Send Message"]',
       busy: 'button[aria-label="Stop response"], button[aria-label="Stop Response"], [data-is-streaming="true"]',
       assistant: 'div[data-is-streaming], .font-claude-response, .font-claude-message',
-      content: '.standard-markdown, .progressive-markdown, .font-claude-response, .font-claude-message',
+      content: '.standard-markdown, .progressive-markdown',
+      contentPick: 'last', // the answer is the last markdown block (thinking comes before it)
       exclude: 'button, details, [class*="thinking"]',
       loggedOut: 'a[href="/login"], button[data-testid="login-button"]',
     },

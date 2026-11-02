@@ -117,42 +117,75 @@ async function runChat({ browsers, store, account, prompt, model, onDelta, signa
     // Stream until the reply is stable and nothing indicates it's still generating.
     let emitted = '';
     let lastText = null;
+    let prevText = null;
     let lastChange = Date.now();
     let seenBusy = !!snap.busy;
+    let firstLogged = false;
+    let endReason = 'stable';
+    const startedAt = Date.now();
     const stableMs = Number(provider.stableMs) || 2000;
     while (true) {
       if (signal && signal.aborted) {
         if (sel.busy) await page.locator(sel.busy).first().click({ timeout: 2000 }).catch(() => {});
         throw new ChatError('Client closed the request', 499, 'aborted');
       }
-      const text = snap.text || '';
-      if (text !== lastText) {
-        lastText = text;
+      // Text outside the answer area (status lines like "Thinking…") is never streamed.
+      const real = snap.matched !== false && !isPlaceholder(snap.text || '');
+      const text = real ? snap.text || '' : '';
+      if (text && !firstLogged) {
+        firstLogged = true;
+        log(account, `answer text appeared after ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+      }
+      if ((snap.text || '') !== lastText) {
+        lastText = snap.text || '';
         lastChange = Date.now();
-        // Only emit when the new text extends what was already sent.
-        if (text.startsWith(emitted) && text.length > emitted.length) {
-          const chunk = text.slice(emitted.length);
-          emitted = text;
-          if (onDelta) onDelta(chunk);
+      }
+      // Stream only the part that has stopped changing, so later re-rendering can't garble output.
+      if (text && text.startsWith(emitted)) {
+        const cut = commitPoint(text, prevText, emitted.length);
+        if (cut > emitted.length) {
+          if (onDelta) onDelta(text.slice(emitted.length, cut));
+          emitted = text.slice(0, cut);
         }
       }
+      prevText = text;
       if (snap.busy) seenBusy = true;
       const quiet = Date.now() - lastChange;
       const need = sel.busy && seenBusy ? stableMs : Math.max(stableMs, 3000);
-      if (!snap.busy && text && quiet >= need) break;
-      if (Date.now() > hardDeadline) break;
+      // Finished = nothing says "generating" and the reply stopped changing.
+      const answer = snap.matched !== false ? snap.text || '' : '';
+      if (!snap.busy && answer && quiet >= need) break;
+      // Answer-area selector never matched (site changed?): accept the whole reply once it's been still for a while.
+      if (!snap.busy && !answer && snap.text && !isPlaceholder(snap.text) && quiet >= Math.max(need, 8000)) {
+        endReason = 'stable (answer-area selector did not match; used whole reply)';
+        break;
+      }
+      if (snap.busy && answer && quiet >= 30000) {
+        endReason = 'busy indicator stuck (reply unchanged for 30s)';
+        break;
+      }
+      if (Date.now() > hardDeadline) {
+        endReason = 'request timeout';
+        break;
+      }
       await sleep(350);
       snap = await page.evaluate(pageSnapshot, sel).catch(() => snap);
     }
 
-    const final = lastText || '';
-    if (!final.startsWith(emitted)) {
-      // Formatting was rewritten after streaming (e.g. a code block closed): send the remainder.
+    // Final text: the answer area if found, otherwise whatever the reply element holds.
+    let final = snap.matched !== false ? snap.text || '' : '';
+    if (!final && lastText && !isPlaceholder(lastText)) final = lastText;
+    if (final.startsWith(emitted)) {
+      if (final.length > emitted.length && onDelta) onDelta(final.slice(emitted.length));
+    } else if (onDelta) {
+      // Rare: already-sent text was re-rendered differently. Send what's missing after the common prefix.
       let i = 0;
       while (i < emitted.length && emitted[i] === final[i]) i++;
-      const rest = final.slice(Math.max(i, emitted.length));
-      if (rest && onDelta) onDelta(rest);
+      log(account, 'warning: reply was re-rendered after streaming started; streamed text may differ slightly from the final reply');
+      const rest = final.slice(i);
+      if (rest) onDelta(rest);
     }
+    log(account, `ended: ${endReason}`);
     if (!final.trim()) throw new ChatError('Empty reply from provider', 502, 'empty_reply');
     log(account, `reply finished (${final.length} chars)`);
     return final;
@@ -177,6 +210,40 @@ const GENERIC_ASSISTANT = [
   '[class*="markdown"]',
   '[class*="assistant"]',
 ].join(', ');
+
+/** Short status lines some sites show before the answer ("Thinking…", "Searching the web…"). */
+function isPlaceholder(text) {
+  const t = String(text).trim();
+  if (!t) return true;
+  if (t.length > 120) return false;
+  return (
+    /^(thinking|thought|reasoning|reckoning|pondering|searching|reading|analy[sz]ing|working|loading|generating|claude is thinking|正在|思考|搜索)/i.test(t) ||
+    (/(…|\.\.\.)$/.test(t) && t.length < 60)
+  );
+}
+
+/**
+ * How much of `text` is safe to stream: the prefix that did not change since the last poll,
+ * cut at a word boundary (prose) or line boundary (lists, tables, headings), never inside an
+ * open code block.
+ */
+function commitPoint(text, prev, already) {
+  if (prev == null) return already;
+  let n = 0;
+  const max = Math.min(text.length, prev.length);
+  while (n < max && text[n] === prev[n]) n++;
+  let stable = text.slice(0, n);
+  const fences = stable.match(/```/g);
+  if (fences && fences.length % 2 === 1) stable = stable.slice(0, stable.lastIndexOf('```'));
+  const lineStart = stable.lastIndexOf('\n') + 1;
+  const line = stable.slice(lineStart);
+  let cut = lineStart;
+  if (line.trim() && !/^\s*([`|#>*+-]|\d+[.)])/.test(line)) {
+    const sp = stable.lastIndexOf(' ');
+    if (sp + 1 > lineStart) cut = sp + 1;
+  }
+  return Math.max(already, cut);
+}
 
 function isEcho(text, prompt) {
   const a = text.replace(/\s+/g, ' ').trim();

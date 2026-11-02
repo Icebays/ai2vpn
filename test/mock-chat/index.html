@@ -46,11 +46,15 @@
     await new Promise(r => setTimeout(r, 400));
     const a = document.createElement('div');
     a.className = 'msg assistant';
-    a.innerHTML = '<div class="md"></div><button>Copy</button>';
+    a.innerHTML = '<div class="status">Thinking…</div><div class="md"></div><button>Copy</button>';
     log.appendChild(a);
     const md = a.querySelector('.md');
     stop.hidden = false;
     stopped = false;
+    // like Claude: animated status words before the answer appears
+    const status = a.querySelector('.status');
+    for (const w of ['Reckoning…', 'Pondering…', 'Claude is thinking']) { await new Promise(r => setTimeout(r, 250)); status.textContent = w; }
+    status.remove();
     const words = ('Hello from the **mock** model. You said: ' + text.slice(0, 2000).replace(/\s+/g, ' ')).split(' ');
     let html = '';
     for (const w of words) {

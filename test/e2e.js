@@ -130,6 +130,9 @@ async function main() {
     const streamed = chunks.map((c) => (c.choices[0] && c.choices[0].delta.content) || '').join('');
     assert.ok(deltas > 3, 'expected several deltas, got ' + deltas);
     assert.ok(streamed.includes('[System]') && streamed.includes('second question'), streamed);
+    assert.ok(!/Reckoning|Pondering|Thinking|thinking/.test(streamed), 'status text leaked into the stream: ' + streamed);
+    assert.ok(streamed.startsWith('Hello from the **mock** model.'), streamed);
+    assert.ok(streamed.endsWith('```js\nconsole.log(1 < 2);\n```'), streamed);
     assert.ok(chunks.some((c) => c.usage), 'usage chunk');
     assert.ok(chunks.some((c) => c.choices[0] && c.choices[0].finish_reason === 'stop'));
     step(`streaming completion with history (${deltas} deltas)`);
