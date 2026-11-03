@@ -17,6 +17,10 @@
  *   exclude    (optional) elements to drop from a reply (thinking, buttons…)
  *   contentPick (optional) "last" = use only the last `content` match of a reply
  *   loggedOut  (optional) element visible only when NOT logged in
+ *   fileInput  (optional) <input type=file> used to attach files (default: any file input)
+ *   attach     (optional) button that opens the file picker when there's no file input
+ *   attachMenu (optional) menu item to click after `attach` (e.g. "Upload files")
+ *   uploading  (optional) element visible while an attachment is still uploading
  * loggedOutUrl  (optional) regex; when the page URL matches, you're logged out
  * loginUrl      (optional) where "Direct login" starts (defaults to homeUrl)
  * loginButton   (optional) button that opens the sign-in form from a landing page
@@ -42,6 +46,8 @@ const BUILTIN = {
       content: '.markdown',
       exclude: 'button, [data-testid*="copy"], .sr-only',
       loggedOut: 'button[data-testid="login-button"]',
+      attach: 'button[aria-label*="Add files" i], button[aria-label*="Attach" i], #composer-plus-btn',
+      attachMenu: '[role="menuitem"]:has-text("Add photos & files"), [role="menuitem"]:has-text("Upload")',
     },
     loggedOutUrl: '/auth/login',
     stableMs: 1500,
@@ -62,6 +68,9 @@ const BUILTIN = {
       contentPick: 'last', // the answer is the last markdown block (thinking comes before it)
       exclude: 'button, details, [class*="thinking"]',
       loggedOut: 'a[href="/login"], button[data-testid="login-button"]',
+      fileInput: 'input[type="file"][data-testid="file-upload"], input[type="file"]',
+      attach: 'button[aria-label*="Add files" i], button[aria-label*="Attach" i], button[data-testid="input-menu-plus"]',
+      attachMenu: '[role="menuitem"]:has-text("Upload a file"), [role="menuitem"]:has-text("Add files")',
     },
     loggedOutUrl: '/login',
     stableMs: 1500,
@@ -81,6 +90,9 @@ const BUILTIN = {
       content: 'message-content .markdown, message-content',
       exclude: 'button, .thoughts-container, model-thoughts',
       loggedOut: 'a[href*="accounts.google.com/ServiceLogin"], a[aria-label="Sign in"]',
+      attach: 'button[aria-label*="upload file menu" i], button[aria-label*="Add files" i], button.upload-card-button',
+      attachMenu: 'button[data-test-id="local-images-files-uploader-button"], [role="menuitem"]:has-text("Upload files")',
+      uploading: 'mat-progress-spinner, .loading-spinner, [role="progressbar"]',
     },
     loggedOutUrl: 'accounts\\.google\\.com',
     stableMs: 2000,
@@ -188,6 +200,12 @@ const BUILTIN = {
   },
 };
 
+// Applied to every provider unless it sets its own value.
+const DEFAULT_SELECTORS = {
+  fileInput: 'input[type="file"]',
+  uploading: '[role="progressbar"], [class*="uploading" i], [aria-label*="Uploading" i]',
+};
+
 function mergeProvider(base, over) {
   if (!over) return base;
   return {
@@ -207,7 +225,7 @@ function resolveProvider(store, account) {
   let base = BUILTIN[id] || overrides[id] || BUILTIN.custom;
   if (BUILTIN[id] && overrides[id]) base = mergeProvider(base, overrides[id]);
   if (account && account.override) base = mergeProvider(base, account.override);
-  return { ...base, id: id || base.id };
+  return { ...base, id: id || base.id, selectors: { ...DEFAULT_SELECTORS, ...(base.selectors || {}) } };
 }
 
 function listProviders(store) {
@@ -238,6 +256,8 @@ function mockProvider() {
       content: '.md',
       exclude: 'button',
       loggedOut: '#login',
+      attach: '#attach',
+      uploading: '.uploading',
     },
     stableMs: 800,
   };

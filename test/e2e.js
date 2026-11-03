@@ -65,6 +65,7 @@ async function main() {
     assert.ok(acc.apiKey.startsWith('sk-a2v-'));
     assert.equal(acc.slug, 'mock-one');
     step('account created: ' + acc.slug);
+    const a2ForFiles = (await req('POST', '/api/accounts', { provider: 'mock', name: 'Other' })).json;
 
     let chk = await req('POST', `/api/accounts/${acc.id}/check`, {});
     assert.equal(chk.json.loggedIn, false, JSON.stringify(chk.json));
@@ -150,6 +151,62 @@ async function main() {
     assert.ok(both[0].json.choices[0].message.content.includes('alpha'));
     assert.ok(both[1].json.choices[0].message.content.includes('beta'));
     step('concurrent requests serialized');
+
+    // ---- file attachments ----
+    const b64 = (t) => Buffer.from(t).toString('base64');
+    const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const auth = { authorization: `Bearer ${acc.apiKey}` };
+    // (a) base64 file + image, attached via the attach button / file chooser
+    let fr = await req('POST', '/v1/chat/completions', {
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: 'read these' },
+        { type: 'file', file: { filename: 'notes.txt', file_data: 'data:text/plain;base64,' + b64('hello attachments') } },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,' + PNG } },
+      ] }],
+    }, auth);
+    assert.equal(fr.status, 200, fr.text);
+    let fc = fr.json.choices[0].message.content;
+    assert.ok(fc.includes('You said: read these'), fc);
+    assert.ok(fc.includes('notes.txt[17b:hello_attachments]'), fc);
+    assert.ok(/image-\d\.png\[70b\]/.test(fc), fc);
+    step('file + image (base64) attached via attach button / file picker');
+
+    // (b) Files API upload → file_id, attached via the page's <input type=file>
+    const fd = new FormData();
+    fd.append('purpose', 'user_data');
+    fd.append('file', new Blob(['{"a": 1, "b": "two"}'], { type: 'application/json' }), 'data.json');
+    const up = await fetch(`${BASE}/v1/files`, { method: 'POST', headers: auth, body: fd });
+    const upj = await up.json();
+    assert.equal(up.status, 200, JSON.stringify(upj));
+    assert.ok(upj.id.startsWith('file-') && upj.bytes === 20 && upj.filename === 'data.json', JSON.stringify(upj));
+    const list = await req('GET', '/v1/files', null, auth);
+    assert.ok(list.json.data.some((f) => f.id === upj.id));
+    const dl = await fetch(`${BASE}/v1/files/${upj.id}/content`, { headers: auth });
+    assert.equal(await dl.text(), '{"a": 1, "b": "two"}');
+    const other = await req('GET', `/v1/files/${upj.id}`, null, { authorization: `Bearer ${a2ForFiles.apiKey}` });
+    assert.equal(other.status, 404, 'another account must not see the file');
+    await req('PATCH', `/api/accounts/${acc.id}`, { override: { newChatUrl: `${BASE}/__mock/?static-input` } });
+    fr = await req('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: [{ type: 'text', text: 'json please' }, { type: 'file', file: { file_id: upj.id } }] }] }, auth);
+    assert.equal(fr.status, 200, fr.text);
+    assert.ok(fr.json.choices[0].message.content.includes('data.json[20b:{"a":_1,_"b":_"two"}]'), fr.json.choices[0].message.content);
+    const del = await req('DELETE', `/v1/files/${upj.id}`, null, auth);
+    assert.equal(del.json.deleted, true);
+    assert.equal((await req('GET', `/v1/files/${upj.id}`, null, auth)).status, 404);
+    step('Files API (upload / list / download / delete / owner isolation) + file_id via file input');
+
+    // (c) no file input and no attach button → drag & drop onto the prompt box
+    await req('PATCH', `/api/accounts/${acc.id}`, { override: { selectors: { attach: '', fileInput: '#no-such-input' } } });
+    fr = await req('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: [{ type: 'file', file: { filename: 'drop.md', file_data: b64('# dropped') } }] }] }, auth);
+    assert.equal(fr.status, 200, fr.text);
+    fc = fr.json.choices[0].message.content;
+    assert.ok(fc.includes('drop.md[9b'), fc);
+    assert.ok(fc.includes('Please look at the attached file(s).'), fc);
+    await req('PATCH', `/api/accounts/${acc.id}`, { override: null });
+    step('file-only message via drag & drop');
+
+    const tooMany = await req('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: Array.from({ length: 11 }, (_, i) => ({ type: 'file', file: { filename: `f${i}.txt`, file_data: b64('x' + i) } })) }] }, auth);
+    assert.equal(tooMany.status, 400);
+    step('file limit enforced');
 
     // outdated reply selector → generic reply detection still finds the answer
     await req('PATCH', `/api/accounts/${acc.id}`, { override: { selectors: { assistant: '.selector-that-no-longer-exists' } } });

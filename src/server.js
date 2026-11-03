@@ -25,7 +25,8 @@ const vpn = new VpnManager(store);
 const app = express();
 app.set('trust proxy', true);
 app.disable('x-powered-by');
-app.use(express.json({ limit: '8mb' }));
+// Large enough for base64-encoded attachments.
+app.use(express.json({ limit: `${Number(process.env.MAX_BODY_MB) || 100}mb` }));
 
 // ---------------- health ----------------
 app.get('/healthz', (req, res) => res.json({ ok: true }));
@@ -35,7 +36,7 @@ const api = createOpenAIRouter({ store, browsers });
 const cors = (req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Api-Key');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 };

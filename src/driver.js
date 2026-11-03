@@ -10,18 +10,34 @@ const { sleep } = require('./util');
 function flattenMessages(messages) {
   const text = (c) => {
     if (typeof c === 'string') return c;
-    if (Array.isArray(c)) return c.map((p) => (typeof p === 'string' ? p : p && p.type === 'text' ? p.text : '')).filter(Boolean).join('\n');
+    if (Array.isArray(c)) return c.map((p) => (typeof p === 'string' ? p : p && (p.type === 'text' || p.type === 'input_text') ? p.text : '')).filter(Boolean).join('\n');
     return c == null ? '' : String(c);
   };
-  const msgs = (messages || []).map((m) => ({ role: m.role, content: text(m.content).trim() })).filter((m) => m.content);
+  // Names of files attached to a message (the files themselves are uploaded separately).
+  const files = (c) =>
+    !Array.isArray(c)
+      ? []
+      : c
+          .filter((p) => p && ['image_url', 'input_image', 'file', 'input_file'].includes(p.type))
+          .map((p) => (p.type === 'file' ? (p.file && p.file.filename) || 'file' : p.filename || (p.type.includes('image') ? 'image' : 'file')));
+  const msgs = (messages || [])
+    .map((m) => {
+      const f = files(m.content);
+      let content = text(m.content).trim();
+      return { role: m.role, content, files: f };
+    })
+    .filter((m) => m.content || m.files.length);
   if (!msgs.length) return '';
-  if (msgs.length === 1 && msgs[0].role === 'user') return msgs[0].content;
+  const fileNote = (m) => (m.files.length ? `[Attached: ${m.files.join(', ')}]` : '');
+  if (msgs.length === 1 && msgs[0].role === 'user') {
+    return msgs[0].content || (msgs[0].files.length ? 'Please look at the attached file(s).' : '');
+  }
   const label = { system: 'System', developer: 'System', user: 'User', assistant: 'Assistant', tool: 'Tool' };
-  const parts = msgs.map((m) => `[${label[m.role] || m.role}]\n${m.content}`);
+  const parts = msgs.map((m) => `[${label[m.role] || m.role}]\n${[m.content, fileNote(m)].filter(Boolean).join('\n')}`);
   const last = msgs[msgs.length - 1];
   const intro =
     'Below is a conversation transcript. Follow any [System] instructions and reply to the final [User] message as the Assistant. ' +
-    'Reply with the answer only, without a role label.\n\n';
+    'Files mentioned as [Attached: …] are uploaded with this message. Reply with the answer only, without a role label.\n\n';
   return intro + parts.join('\n\n') + (last.role === 'user' ? '' : '\n\n[User]\nContinue.');
 }
 
@@ -37,7 +53,7 @@ class ChatError extends Error {
  * Send one prompt through the provider's web UI and stream the reply.
  * onDelta(textChunk) is called as new text appears.
  */
-async function runChat({ browsers, store, account, prompt, model, onDelta, signal, timeoutMs }) {
+async function runChat({ browsers, store, account, prompt, model, onDelta, signal, timeoutMs, files = [] }) {
   const provider = resolveProvider(store, account);
   let sel = { ...provider.selectors, loggedOutUrl: provider.loggedOutUrl };
   if (!sel.input || !sel.assistant) throw new ChatError('Provider is missing input/assistant selectors', 500, 'config_error');
@@ -72,6 +88,10 @@ async function runChat({ browsers, store, account, prompt, model, onDelta, signa
 
     await fillInput(page, input, prompt);
     await sleep(250);
+    if (files.length) {
+      await uploadFiles(page, input, sel, files, account);
+      if (signal && signal.aborted) throw new ChatError('Client closed the request', 499, 'aborted');
+    }
     await submit(page, input, sel);
 
     // Wait for the reply to appear.
@@ -270,6 +290,86 @@ async function saveDebug(store, account, page, err) {
 function isAlias(model, account, provider) {
   const m = String(model).toLowerCase();
   return !m || m === 'default' || m === account.slug || m === provider.id || m === `${provider.id}/${account.slug}`;
+}
+
+/**
+ * Attach files to the chat. Tries, in order:
+ *   1. the page's <input type=file>
+ *   2. clicking the attach button (+ menu item) and answering the file chooser
+ *   3. dropping the files onto the prompt box
+ * then waits until the site has finished uploading.
+ * files: [{ path, name, mime }]
+ */
+async function uploadFiles(page, input, sel, files, account) {
+  const paths = files.map((f) => f.path);
+  let method = '';
+  const inputs = page.locator(sel.fileInput || 'input[type="file"]');
+  const count = await inputs.count().catch(() => 0);
+  if (count) {
+    // Prefer an input that accepts any file type, then one that allows several files.
+    const infos = [];
+    for (let i = 0; i < Math.min(count, 10); i++) {
+      infos.push(await inputs.nth(i).evaluate((el) => ({ multiple: el.multiple, accept: el.accept || '' })).catch(() => ({ multiple: false, accept: 'x' })));
+    }
+    const allImages = files.every((f) => (f.mime || '').startsWith('image/'));
+    const fits = (a) => !a.accept || a.accept.includes('*/*') || (allImages && a.accept.includes('image'));
+    let idx = infos.findIndex((a) => fits(a) && a.multiple);
+    if (idx < 0) idx = infos.findIndex(fits);
+    if (idx < 0) idx = 0;
+    const target = inputs.nth(idx);
+    if (infos[idx].multiple || paths.length === 1) await target.setInputFiles(paths);
+    else for (const p of paths) {
+      await target.setInputFiles(p);
+      await sleep(600);
+    }
+    method = 'file input';
+  } else if (sel.attach && (await page.locator(sel.attach).first().isVisible().catch(() => false))) {
+    const chooserP = page.waitForEvent('filechooser', { timeout: 10000 });
+    await page.locator(sel.attach).first().click({ timeout: 5000 });
+    if (sel.attachMenu) {
+      const item = page.locator(sel.attachMenu).first();
+      await item.waitFor({ state: 'visible', timeout: 4000 }).catch(() => {});
+      await item.click({ timeout: 4000 }).catch(() => {});
+    }
+    const chooser = await chooserP.catch(() => null);
+    if (!chooser) throw new ChatError('Clicked the attach button but no file picker opened (selectors attach / attachMenu may be outdated).', 502, 'upload_failed');
+    if (chooser.isMultiple() || paths.length === 1) await chooser.setFiles(paths);
+    else await chooser.setFiles(paths[0]); // site allows one file at a time
+    method = 'attach button';
+  } else {
+    const payload = await Promise.all(
+      files.map(async (f) => ({ name: f.name, type: f.mime || 'application/octet-stream', b64: (await require('fs').promises.readFile(f.path)).toString('base64') }))
+    );
+    await input.evaluate((el, list) => {
+      const dt = new DataTransfer();
+      for (const f of list) {
+        const bin = atob(f.b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        dt.items.add(new File([bytes], f.name, { type: f.type }));
+      }
+      for (const type of ['dragenter', 'dragover', 'drop']) {
+        el.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+      }
+    }, payload);
+    method = 'drag & drop';
+  }
+  log(account, `attached ${files.length} file(s) via ${method}: ${files.map((f) => f.name).join(', ')}`);
+
+  // Wait for the upload: no "uploading" indicator and (if known) the send button enabled.
+  await sleep(1200 + 300 * files.length);
+  const deadline = Date.now() + (Number(process.env.UPLOAD_TIMEOUT_SEC) || 180) * 1000;
+  while (Date.now() < deadline) {
+    const uploading = sel.uploading ? await page.locator(sel.uploading).first().isVisible().catch(() => false) : false;
+    let ready = true;
+    if (sel.send) {
+      const btn = page.locator(sel.send).first();
+      ready = (await btn.isVisible().catch(() => false)) && (await btn.isEnabled().catch(() => false));
+    }
+    if (!uploading && ready) return;
+    await sleep(500);
+  }
+  log(account, 'upload still looks busy after the timeout — sending anyway');
 }
 
 async function fillInput(page, input, text) {

@@ -58,6 +58,7 @@ print(r.choices[0].message.content)
 |---|---|
 | `POST /v1/chat/completions` | OpenAI Chat Completions. Supports `stream: true` (SSE) and `stream_options.include_usage`. |
 | `GET /v1/models` | One model per account (the account's slug). |
+| `POST /v1/files` | Upload a file (multipart `file` + `purpose`). Returns a `file-…` id to use in chats. Also `GET /v1/files`, `GET /v1/files/<id>`, `GET /v1/files/<id>/content`, `DELETE /v1/files/<id>`. Files expire after 24 hours. |
 | `/acc/<slug>/v1/...` | The same endpoints pinned to one account. |
 | `GET /acc/<slug>/openapi.json` | OpenAPI 3.1 spec for that account. Swagger UI is at `/acc/<slug>/docs`. |
 | `GET /v1/openapi.json`, `/docs` | Spec covering all accounts. |
@@ -67,6 +68,36 @@ print(r.choices[0].message.content)
 **How a request runs.** Each request opens a fresh chat in the web UI and types the prompt. For multi-turn requests, the earlier messages are replayed in the prompt as a transcript. Requests to the same account are queued (one at a time per account); different accounts run in parallel. Token usage is estimated at 4 characters per token.
 
 For ChatGPT, a `model` value that isn't an alias (for example `gpt-5`) is passed to `chatgpt.com/?model=…`.
+
+## Files and images
+
+You can attach any file the chat site accepts: images, PDF, Word/Excel/PowerPoint, text, code, CSV, zip and so on. Use the standard OpenAI content parts:
+
+```python
+import base64
+from openai import OpenAI
+
+client = OpenAI(base_url="http://<host>:8080/v1", api_key="sk-a2v-…")
+
+# 1) inline (base64)
+pdf = base64.b64encode(open("report.pdf", "rb").read()).decode()
+r = client.chat.completions.create(model="claude", messages=[{"role": "user", "content": [
+    {"type": "text", "text": "Summarize this report"},
+    {"type": "file", "file": {"filename": "report.pdf", "file_data": f"data:application/pdf;base64,{pdf}"}},
+    {"type": "image_url", "image_url": {"url": "https://example.com/chart.png"}},
+]}])
+
+# 2) upload once, reuse by id
+f = client.files.create(file=open("data.xlsx", "rb"), purpose="user_data")
+r = client.chat.completions.create(model="claude", messages=[{"role": "user", "content": [
+    {"type": "text", "text": "What trends do you see?"},
+    {"type": "file", "file": {"file_id": f.id}},
+]}])
+```
+
+Inside the container, ai2vpn attaches the files to the chat before sending. It uses the page's file input if there is one, otherwise it clicks the attach button and answers the file picker, otherwise it drops the files onto the prompt box. It then waits for the upload to finish. Remote URLs are downloaded through the VPN.
+
+Limits: 10 files per request and 50 MB per file (`MAX_FILES_PER_REQUEST`, `MAX_UPLOAD_MB`). The chat site's own limits also apply, for example file types or daily upload caps on free plans. If a site changes its attach button, fix the `fileInput` / `attach` / `attachMenu` / `uploading` selectors in **Settings → Provider overrides**.
 
 ## VPN
 
@@ -102,6 +133,8 @@ Chat sites change their markup often. Every provider is described by CSS selecto
 | `VPN_MODE` | (set in the UI) | Set to `external` when gluetun or the host handles the VPN |
 | `TZ`, `BROWSER_LOCALE` | `UTC`, `en-US` | Browser timezone and locale |
 | `MAX_QUEUE` | `20` | Maximum queued requests per account |
+| `MAX_UPLOAD_MB`, `MAX_FILES_PER_REQUEST` | `50`, `10` | Attachment limits |
+| `FILE_TTL_HOURS` | `24` | How long `/v1/files` uploads are kept |
 
 Everything is stored in `/data` (`./data` on the host): `config.json` (accounts, keys, VPN settings, saved sign-ins), `profiles/<id>` (browser profiles, i.e. your logged-in sessions), and `vpn/`. **Treat this folder as a secret.**
 
@@ -122,7 +155,7 @@ ADMIN_PASSWORD=dev HEADLESS=true npm start
 ## Notes and limits
 
 - **Use your own accounts.** Driving a consumer chat UI through automation can be against a provider's terms of service, and providers may rate-limit, challenge or suspend accounts. The official APIs are the supported route for production workloads. You are responsible for how you use this.
-- **Text only.** Images and file uploads, tool or function calling, and sampling parameters (`temperature`, …) are ignored.
+- **No tool or function calling**, and sampling parameters (`temperature`, …) are ignored. That also means coding agents such as Claude Code or Codex can't run on top of this API; both of those can sign in with your Claude / ChatGPT subscription directly.
 - **Captchas, email codes and passkeys** can't be completed automatically. Direct login stops and asks you to finish in the remote browser, or to type the code into the dialog.
 - **Google often blocks sign-in from automated browsers.** If Gemini's sign-in is rejected, use **Import cookies**.
 - **Do not expose port 8080 to the internet without TLS.** Put it behind a reverse proxy (Caddy, Traefik, nginx) with HTTPS. Anyone with the admin password controls your accounts.

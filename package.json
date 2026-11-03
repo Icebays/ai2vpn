@@ -13,6 +13,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "busboy": "^1.6.0",
     "express": "^4.21.2",
     "playwright": "1.63.0",
     "ws": "^8.18.3"

@@ -5,6 +5,9 @@ const { runChat, flattenMessages, ChatError } = require('./driver');
 const { safeEqual, KeyedQueue } = require('./util');
 const { buildOpenApi } = require('./openapi');
 const { directLogin } = require('./login');
+const { FileStore, fileObject, extractAttachments, materialize, mimeFor, MAX_FILE_BYTES } = require('./attachments');
+const Busboy = require('busboy');
+const fsp = require('fs').promises;
 
 function baseUrl(store, req) {
   const configured = (store.settings.publicUrl || process.env.PUBLIC_URL || '').replace(/\/+$/, '');
@@ -33,6 +36,18 @@ const approxTokens = (s) => Math.max(1, Math.ceil((s || '').length / 4));
 function createOpenAIRouter({ store, browsers }) {
   const router = express.Router({ mergeParams: true });
   const queue = new KeyedQueue(Number(process.env.MAX_QUEUE || 20));
+  const files = new FileStore(store.dir);
+  const isMasterKey = (req) => {
+    const key = getKey(req);
+    return !!(key && store.settings.masterKey && safeEqual(key, store.settings.masterKey));
+  };
+
+  /** Who owns uploaded files: the account behind the key, or "master". */
+  function fileOwner(req, res) {
+    if (isMasterKey(req) && !req.params.slug) return 'master';
+    const a = resolveAccount(req, res, 'x-files');
+    return a ? a.id : null;
+  }
 
   /** Find the account this request is for, or send a 401/404. */
   function resolveAccount(req, res, requestedModel) {
@@ -99,6 +114,12 @@ function createOpenAIRouter({ store, browsers }) {
     if (!Array.isArray(body.messages) || !body.messages.length) return oaiError(res, 400, "'messages' must be a non-empty array");
     const prompt = flattenMessages(body.messages);
     if (!prompt) return oaiError(res, 400, 'No text content in messages');
+    let attachments = [];
+    try {
+      attachments = await extractAttachments(body.messages, { files, owner: account.id, isMaster: isMasterKey(req) });
+    } catch (e) {
+      return oaiError(res, e.status || 400, e.message, e.code || 'invalid_file');
+    }
 
     const stream = !!body.stream;
     const id = 'chatcmpl-' + crypto.randomBytes(12).toString('hex');
@@ -136,12 +157,26 @@ function createOpenAIRouter({ store, browsers }) {
     store.save();
 
     try {
-      const chat = () =>
+      const chat = async () => {
+        let tmp = null;
+        try {
+          let fileList = [];
+          if (attachments.length) {
+            tmp = await materialize(attachments, store.dir);
+            fileList = attachments.map((a, i) => ({ path: tmp.paths[i], name: a.name, mime: a.mime }));
+          }
+          return await runChatOnce(fileList);
+        } finally {
+          if (tmp) fsp.rm(tmp.dir, { recursive: true, force: true }).catch(() => {});
+        }
+      };
+      const runChatOnce = (fileList) =>
         runChat({
           browsers,
           store,
           account,
           prompt,
+          files: fileList,
           model: body.model,
           signal: ac.signal,
           timeoutMs: (Number(store.settings.requestTimeoutSec) || 300) * 1000,
@@ -202,6 +237,76 @@ function createOpenAIRouter({ store, browsers }) {
         oaiError(res, status, e.message, e.code || 'error', e instanceof ChatError ? 'upstream_error' : 'server_error');
       }
     }
+  });
+
+  // ---------------- Files API (OpenAI-compatible) ----------------
+  router.post('/files', (req, res) => {
+    const owner = fileOwner(req, res);
+    if (!owner) return;
+    if (!/multipart\/form-data/i.test(req.headers['content-type'] || '')) {
+      return oaiError(res, 400, 'Upload with multipart/form-data: fields "file" and "purpose"');
+    }
+    let bb;
+    try {
+      bb = Busboy({ headers: req.headers, limits: { files: 1, fileSize: MAX_FILE_BYTES + 1 } });
+    } catch (e) {
+      return oaiError(res, 400, e.message);
+    }
+    let purpose = 'user_data';
+    let saving = null;
+    bb.on('field', (name, val) => {
+      if (name === 'purpose') purpose = String(val).slice(0, 40);
+    });
+    bb.on('file', (name, stream, info) => {
+      if (name !== 'file' || saving) return stream.resume();
+      saving = files.saveStream({ stream, filename: info.filename, mime: info.mimeType, purpose, owner });
+      saving.catch(() => stream.resume());
+    });
+    bb.on('close', async () => {
+      if (!saving) return oaiError(res, 400, 'Missing "file" field');
+      try {
+        const meta = await saving;
+        meta.purpose = purpose;
+        res.json(fileObject(meta));
+      } catch (e) {
+        oaiError(res, e.status || 400, e.message, e.code || 'invalid_file');
+      }
+    });
+    bb.on('error', (e) => oaiError(res, 400, e.message));
+    req.pipe(bb);
+  });
+
+  const ownFile = (req, res) => {
+    const owner = fileOwner(req, res);
+    if (!owner) return null;
+    const m = files.get(req.params.id);
+    if (!m || (owner !== 'master' && m.owner !== owner)) {
+      oaiError(res, 404, `No such file: ${req.params.id}`, 'file_not_found');
+      return null;
+    }
+    return m;
+  };
+  router.get('/files', (req, res) => {
+    const owner = fileOwner(req, res);
+    if (!owner) return;
+    res.json({ object: 'list', data: files.list(owner === 'master' ? null : owner).map(fileObject) });
+  });
+  router.get('/files/:id', (req, res) => {
+    const m = ownFile(req, res);
+    if (m) res.json(fileObject(m));
+  });
+  router.get('/files/:id/content', async (req, res) => {
+    const m = ownFile(req, res);
+    if (!m) return;
+    res.type(m.mime || mimeFor(m.filename));
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(m.filename)}"`);
+    res.send(await files.read(m.id));
+  });
+  router.delete('/files/:id', async (req, res) => {
+    const m = ownFile(req, res);
+    if (!m) return;
+    await files.remove(m.id);
+    res.json({ id: m.id, object: 'file', deleted: true });
   });
 
   router.use((req, res) => oaiError(res, 404, `Unknown endpoint ${req.method} ${req.originalUrl}`, 'not_found'));

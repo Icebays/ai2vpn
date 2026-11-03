@@ -427,6 +427,7 @@ function openPlayground(a) {
   const m = modal(`<div class="modal-body playground">
     <h3>Test — ${esc(a.name)}</h3>
     <label>Prompt<textarea id="pg-in">Say hello and tell me which model you are in one sentence.</textarea></label>
+    <label>Files <span class="muted small">(optional — images, PDF, documents, code… up to 10)</span><input type="file" id="pg-files" multiple></label>
     <label class="check"><input type="checkbox" id="pg-stream" checked> Stream</label>
     <div class="actions" style="align-items:center"><button class="btn primary" id="pg-go">Send</button>
       <button class="btn" id="pg-watch" title="See the account's browser while it answers">Watch live</button>
@@ -454,12 +455,20 @@ function openPlayground(a) {
     const timer = setInterval(() => ($('#pg-time', m.el).textContent = `${((Date.now() - t0) / 1000).toFixed(1)}s`), 100);
     ctl = new AbortController();
     const stream = $('#pg-stream', m.el).checked;
+    // Build OpenAI content parts: text + each file as base64 (images as image_url, others as file).
+    const readDataUrl = (f) => new Promise((ok, bad) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = bad; r.readAsDataURL(f); });
+    const content = [{ type: 'text', text: $('#pg-in', m.el).value }];
+    for (const f of $('#pg-files', m.el).files) {
+      const url = await readDataUrl(f);
+      content.push(f.type.startsWith('image/') ? { type: 'image_url', image_url: { url } } : { type: 'file', file: { filename: f.name, file_data: url } });
+    }
+    const userContent = content.length > 1 ? content : $('#pg-in', m.el).value;
     try {
       const r = await fetch('/v1/chat/completions', {
         method: 'POST',
         signal: ctl.signal,
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${a.apiKey}` },
-        body: JSON.stringify({ model: a.slug, stream, messages: [{ role: 'user', content: $('#pg-in', m.el).value }] }),
+        body: JSON.stringify({ model: a.slug, stream, messages: [{ role: 'user', content: userContent }] }),
       });
       if (!stream) {
         const j = await r.json();

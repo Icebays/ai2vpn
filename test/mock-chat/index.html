@@ -16,10 +16,12 @@
 <div id="auth"></div>
 <div id="log"></div>
 <div id="composer" hidden>
+  <button id="attach" title="Attach">+</button>
   <textarea id="prompt" placeholder="Message"></textarea>
   <button id="send">Send</button>
   <button id="stop" hidden>Stop</button>
 </div>
+<div id="atts"></div>
 <script>
   const loggedIn = document.cookie.includes('mock_auth=1');
   const auth = document.getElementById('auth');
@@ -30,6 +32,44 @@
     auth.textContent = 'Logged in as tester';
     document.getElementById('composer').hidden = false;
   }
+  // ---- attachments: static file input (?static-input), attach button (file chooser), or drag & drop ----
+  const attached = [];
+  const sendBtn = document.getElementById('send');
+  function addFiles(list) {
+    const files = [...list];
+    if (!files.length) return;
+    const up = document.createElement('div');
+    up.className = 'uploading';
+    up.textContent = 'Uploading…';
+    document.getElementById('atts').appendChild(up);
+    sendBtn.disabled = true;
+    setTimeout(async () => {
+      for (const f of files) {
+        const text = /^text\/|json/.test(f.type) ? (await f.text()).slice(0, 40) : null;
+        attached.push({ name: f.name, size: f.size, text });
+        const chip = document.createElement('span');
+        chip.className = 'att';
+        chip.textContent = f.name;
+        document.getElementById('atts').appendChild(chip);
+      }
+      up.remove();
+      sendBtn.disabled = false;
+    }, 900);
+  }
+  if (location.search.includes('static-input')) {
+    const fi = document.createElement('input');
+    fi.type = 'file'; fi.multiple = true; fi.hidden = true;
+    fi.onchange = () => addFiles(fi.files);
+    document.body.appendChild(fi);
+  }
+  document.getElementById('attach').onclick = () => {
+    const fi = document.createElement('input');
+    fi.type = 'file'; fi.multiple = true;
+    fi.onchange = () => addFiles(fi.files);
+    fi.click();
+  };
+  document.getElementById('prompt').addEventListener('drop', (e) => { e.preventDefault(); addFiles(e.dataTransfer.files); });
+
   const log = document.getElementById('log');
   const prompt = document.getElementById('prompt');
   const stop = document.getElementById('stop');
@@ -55,7 +95,10 @@
     const status = a.querySelector('.status');
     for (const w of ['Reckoning…', 'Pondering…', 'Claude is thinking']) { await new Promise(r => setTimeout(r, 250)); status.textContent = w; }
     status.remove();
-    const words = ('Hello from the **mock** model. You said: ' + text.slice(0, 2000).replace(/\s+/g, ' ')).split(' ');
+    const fileInfo = attached.length ? ' Files: ' + attached.map(f => `${f.name}[${f.size}b${f.text ? ':' + f.text.replace(/\s+/g, '_') : ''}]`).join(',') : '';
+    attached.length = 0;
+    document.getElementById('atts').innerHTML = '';
+    const words = ('Hello from the **mock** model. You said: ' + text.slice(0, 2000).replace(/\s+/g, ' ') + fileInfo).split(' ');
     let html = '';
     for (const w of words) {
       if (stopped) break;

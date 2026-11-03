@@ -29,9 +29,47 @@ function buildOpenApi({ base, account, accounts }) {
             content: {
               oneOf: [
                 { type: 'string' },
-                { type: 'array', items: { type: 'object', properties: { type: { type: 'string', const: 'text' }, text: { type: 'string' } } } },
+                { type: 'array', items: { $ref: '#/components/schemas/ContentPart' } },
               ],
             },
+          },
+        },
+        ContentPart: {
+          description: 'Text, an image, or any file. Files are uploaded into the chat page before the message is sent.',
+          oneOf: [
+            { type: 'object', required: ['type', 'text'], properties: { type: { const: 'text' }, text: { type: 'string' } } },
+            {
+              type: 'object',
+              required: ['type', 'image_url'],
+              properties: {
+                type: { const: 'image_url' },
+                image_url: { type: 'object', properties: { url: { type: 'string', description: 'data:image/…;base64,… or https://…' } } },
+              },
+            },
+            {
+              type: 'object',
+              required: ['type', 'file'],
+              properties: {
+                type: { const: 'file' },
+                file: {
+                  type: 'object',
+                  description: 'Either file_data (base64 or data: URL, with filename) or file_id from POST /files',
+                  properties: { filename: { type: 'string' }, file_data: { type: 'string' }, file_id: { type: 'string' } },
+                },
+              },
+            },
+          ],
+        },
+        FileObject: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', example: 'file-1a2b3c…' },
+            object: { const: 'file' },
+            bytes: { type: 'integer' },
+            created_at: { type: 'integer' },
+            expires_at: { type: 'integer' },
+            filename: { type: 'string' },
+            purpose: { type: 'string' },
           },
         },
         ChatCompletionRequest: {
@@ -100,6 +138,35 @@ function buildOpenApi({ base, account, accounts }) {
             502: { description: 'The web UI did not answer as expected', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           },
         },
+      },
+      '/files': {
+        post: {
+          operationId: 'uploadFile',
+          summary: 'Upload a file to attach to chats via file_id (kept for FILE_TTL_HOURS, default 24h)',
+          requestBody: {
+            required: true,
+            content: {
+              'multipart/form-data': {
+                schema: { type: 'object', required: ['file'], properties: { file: { type: 'string', format: 'binary' }, purpose: { type: 'string', default: 'user_data' } } },
+              },
+            },
+          },
+          responses: { 200: { description: 'Uploaded', content: { 'application/json': { schema: { $ref: '#/components/schemas/FileObject' } } } } },
+        },
+        get: {
+          operationId: 'listFiles',
+          summary: 'List uploaded files',
+          responses: { 200: { description: 'Files', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'array', items: { $ref: '#/components/schemas/FileObject' } } } } } } } },
+        },
+      },
+      '/files/{file_id}': {
+        parameters: [{ name: 'file_id', in: 'path', required: true, schema: { type: 'string' } }],
+        get: { operationId: 'getFile', summary: 'File metadata', responses: { 200: { description: 'File', content: { 'application/json': { schema: { $ref: '#/components/schemas/FileObject' } } } } } },
+        delete: { operationId: 'deleteFile', summary: 'Delete a file', responses: { 200: { description: 'Deleted' } } },
+      },
+      '/files/{file_id}/content': {
+        parameters: [{ name: 'file_id', in: 'path', required: true, schema: { type: 'string' } }],
+        get: { operationId: 'downloadFile', summary: 'Download file content', responses: { 200: { description: 'The file' } } },
       },
       '/models': {
         get: {
