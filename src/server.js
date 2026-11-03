@@ -14,6 +14,8 @@ const { buildOpenApi } = require('./openapi');
 const { listProviders, resolveProvider, BUILTIN } = require('./providers');
 const { parseCookieText } = require('./cookies');
 const { directLogin } = require('./login');
+const { discoverModels } = require('./models');
+const { pageSnapshot } = require('./extract');
 const { newApiKey, randomId, slugify } = require('./util');
 
 const PORT = Number(process.env.PORT || 8080);
@@ -100,6 +102,8 @@ function accountView(a, req) {
     credentials: a.credentials ? { email: a.credentials.email, totp: !!a.credentials.totpSecret, autoRelogin: a.credentials.autoRelogin !== false } : null,
     lastCheck: a.lastCheck || null,
     debugAt: a.debugAt || null,
+    models: a.models || [],
+    modelsAt: a.modelsAt || null,
     stats: a.stats || { requests: 0, errors: 0 },
     endpoints: {
       base: `${base}/v1`,
@@ -252,6 +256,34 @@ admin.delete(
     delete a.credentials;
     store.save();
     res.json(accountView(a, req));
+  })
+);
+
+// Read the model names from the site's model menu.
+admin.post(
+  '/accounts/:id/models',
+  wrap(async (req, res) => {
+    const a = need(store.account(req.params.id));
+    const p = resolveProvider(store, a);
+    const models = await api.queue.run(a.id, async () => {
+      const page = await browsers.getPage(a);
+      browsers.setBusy(a.id, true);
+      try {
+        await page.goto(p.newChatUrl || p.homeUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        for (let i = 0; i < 40; i++) {
+          const snap = await page.evaluate(pageSnapshot, { ...p.selectors, loggedOutUrl: p.loggedOutUrl }).catch(() => null);
+          if (snap && snap.hasInput) break;
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        return await discoverModels(page, p);
+      } finally {
+        browsers.setBusy(a.id, false);
+      }
+    });
+    a.models = models;
+    a.modelsAt = Date.now();
+    store.save();
+    res.json({ models, account: accountView(a, req), note: models.length ? '' : 'No model menu found on the page (selectors.modelButton may be missing or outdated).' });
   })
 );
 

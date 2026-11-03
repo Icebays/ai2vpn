@@ -152,6 +152,31 @@ async function main() {
     assert.ok(both[1].json.choices[0].message.content.includes('beta'));
     step('concurrent requests serialized');
 
+    // ---- model selection through the site's model menu ----
+    const ask = (model) => req('POST', '/v1/chat/completions', { model, messages: [{ role: 'user', content: 'which model' }] }, { authorization: `Bearer ${acc.apiKey}` });
+    let mr = await ask('smart-2');
+    assert.equal(mr.status, 200, mr.text);
+    assert.ok(mr.json.choices[0].message.content.includes('[model: Smart 2, think: off]'), mr.json.choices[0].message.content);
+    mr = await ask('Legacy 0.9');
+    assert.ok(mr.json.choices[0].message.content.includes('[model: Legacy 0.9,'), mr.json.choices[0].message.content);
+    mr = await ask('mock-one/smart-2-think');
+    assert.ok(mr.json.choices[0].message.content.includes('[model: Smart 2, think: on]'), mr.json.choices[0].message.content);
+    mr = await ask('mock-one');
+    assert.ok(mr.json.choices[0].message.content.includes('[model: Fast 1, think: off]'), mr.json.choices[0].message.content);
+    mr = await ask('turbo-9000');
+    assert.equal(mr.status, 400, mr.text);
+    assert.equal(mr.json.error.code, 'model_not_found');
+    assert.ok(mr.json.error.message.includes('Fast 1 | Smart 2'), mr.json.error.message);
+    step('model menu: pick, submenu, toggle, default, unknown model → 400 with list');
+
+    const disc = await req('POST', `/api/accounts/${acc.id}/models`, {});
+    assert.deepEqual(disc.json.models.map((m) => m.label), ['Fast 1', 'Smart 2', 'Legacy 0.9'], disc.text);
+    const ml = await req('GET', '/v1/models', null, { authorization: `Bearer ${acc.apiKey}` });
+    assert.ok(ml.json.data.some((m) => m.id === 'mock-one/smart-2'), JSON.stringify(ml.json.data));
+    const viaMaster = await req('POST', '/v1/chat/completions', { model: 'mock-one/legacy-0-9', messages: [{ role: 'user', content: 'x' }] }, { authorization: `Bearer ${(await req('GET', '/api/settings')).json.masterKey}` });
+    assert.ok(viaMaster.json.choices[0].message.content.includes('[model: Legacy 0.9,'), viaMaster.text);
+    step('model discovery → /v1/models; master key with account/model');
+
     // ---- file attachments ----
     const b64 = (t) => Buffer.from(t).toString('base64');
     const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';

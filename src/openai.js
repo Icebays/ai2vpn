@@ -70,6 +70,7 @@ function createOpenAIRouter({ store, browsers }) {
       enabled.find((a) => a.slug === m) ||
       enabled.find((a) => `${a.provider}/${a.slug}` === m) ||
       enabled.find((a) => a.provider === m) ||
+      enabled.find((a) => m.startsWith(a.slug + '/')) ||
       enabled.find((a) => m.startsWith(a.provider + '/'));
     if (hit) return hit;
     return oaiError(res, 404, `No account matches model '${requestedModel}'. Use one of: ${enabled.map(modelId).join(', ')}`, 'model_not_found');
@@ -89,16 +90,14 @@ function createOpenAIRouter({ store, browsers }) {
       if (!a) return;
       accounts = [a];
     }
-    res.json({
-      object: 'list',
-      data: accounts.map((a) => ({
-        id: modelId(a),
-        object: 'model',
-        created: Math.floor((a.createdAt || Date.now()) / 1000),
-        owned_by: a.provider,
-        name: a.name,
-      })),
-    });
+    // One entry per account (site default model) + one per model found in the site's menu.
+    const data = [];
+    for (const a of accounts) {
+      const created = Math.floor((a.createdAt || Date.now()) / 1000);
+      data.push({ id: modelId(a), object: 'model', created, owned_by: a.provider, name: `${a.name} (default)` });
+      for (const m of a.models || []) data.push({ id: `${modelId(a)}/${m.id}`, object: 'model', created, owned_by: a.provider, name: `${a.name} · ${m.label}` });
+    }
+    res.json({ object: 'list', data });
   });
 
   router.get('/openapi.json', (req, res) => {
@@ -310,6 +309,7 @@ function createOpenAIRouter({ store, browsers }) {
   });
 
   router.use((req, res) => oaiError(res, 404, `Unknown endpoint ${req.method} ${req.originalUrl}`, 'not_found'));
+  router.queue = queue; // shared with admin actions that use the same browser page
   return router;
 }
 

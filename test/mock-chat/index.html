@@ -13,6 +13,16 @@
 </head>
 <body>
 <h1>Mock Chat</h1>
+<div id="models">
+  <button id="model-btn" aria-haspopup="menu">Fast 1</button>
+  <button id="think" aria-pressed="false">Think</button>
+  <div id="model-menu" hidden>
+    <div role="menuitem">Fast 1<br><small>Quick answers</small></div>
+    <div role="menuitem">Smart 2<br><small>Best for hard tasks</small></div>
+    <div role="menuitem" id="more">More models</div>
+    <div id="legacy" hidden><div role="menuitem">Legacy 0.9</div></div>
+  </div>
+</div>
 <div id="auth"></div>
 <div id="log"></div>
 <div id="composer" hidden>
@@ -32,6 +42,20 @@
     auth.textContent = 'Logged in as tester';
     document.getElementById('composer').hidden = false;
   }
+  // ---- model menu (with a "More models" submenu) and a Think toggle ----
+  const menu = document.getElementById('model-menu');
+  document.getElementById('model-btn').onclick = () => { menu.hidden = !menu.hidden; document.getElementById('legacy').hidden = true; };
+  document.getElementById('more').onclick = (e) => { e.stopPropagation(); document.getElementById('legacy').hidden = false; };
+  menu.addEventListener('click', (e) => {
+    const item = e.target.closest('[role="menuitem"]');
+    if (!item || item.id === 'more') return;
+    document.getElementById('model-btn').textContent = item.firstChild.textContent.trim();
+    menu.hidden = true;
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') menu.hidden = true; });
+  const think = document.getElementById('think');
+  think.onclick = () => think.setAttribute('aria-pressed', think.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+
   // ---- attachments: static file input (?static-input), attach button (file chooser), or drag & drop ----
   const attached = [];
   const sendBtn = document.getElementById('send');
@@ -98,7 +122,8 @@
     const fileInfo = attached.length ? ' Files: ' + attached.map(f => `${f.name}[${f.size}b${f.text ? ':' + f.text.replace(/\s+/g, '_') : ''}]`).join(',') : '';
     attached.length = 0;
     document.getElementById('atts').innerHTML = '';
-    const words = ('Hello from the **mock** model. You said: ' + text.slice(0, 2000).replace(/\s+/g, ' ') + fileInfo).split(' ');
+    const modelInfo = ` [model: ${document.getElementById('model-btn').textContent}, think: ${think.getAttribute('aria-pressed') === 'true' ? 'on' : 'off'}]`;
+    const words = ('Hello from the **mock** model. You said: ' + text.slice(0, 2000).replace(/\s+/g, ' ') + fileInfo + modelInfo).split(' ');
     let html = '';
     for (const w of words) {
       if (stopped) break;

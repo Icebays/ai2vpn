@@ -2,6 +2,7 @@
 const { pageSnapshot } = require('./extract');
 const { resolveProvider } = require('./providers');
 const { sleep } = require('./util');
+const { selectModel } = require('./models');
 
 /**
  * Turn an OpenAI-style message list into one prompt for a chat web UI.
@@ -60,31 +61,44 @@ async function runChat({ browsers, store, account, prompt, model, onDelta, signa
   const page = await browsers.getPage(account);
   browsers.setBusy(account.id, true);
   try {
-    let url = provider.newChatUrl || provider.homeUrl;
-    if (model && provider.modelUrl && !isAlias(model, account, provider)) {
-      url = provider.modelUrl.replace('{model}', encodeURIComponent(model));
-    }
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    const wantModel = requestedModel(model, account, provider);
+    await page.goto(provider.newChatUrl || provider.homeUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
 
     const input = page.locator(sel.input).first();
     // Wait for the prompt box; bail out early if the page clearly shows a logged-out state.
-    let before = null;
-    let loggedOutSince = 0;
-    for (const end = Date.now() + 30000; Date.now() < end; ) {
-      before = await page.evaluate(pageSnapshot, sel).catch(() => null);
-      if (before && before.hasInput) break;
-      if (before && before.loggedOut) {
-        loggedOutSince = loggedOutSince || Date.now();
-        if (Date.now() - loggedOutSince > 3000) break;
+    const waitForInput = async () => {
+      let snap = null;
+      let loggedOutSince = 0;
+      for (const end = Date.now() + 30000; Date.now() < end; ) {
+        snap = await page.evaluate(pageSnapshot, sel).catch(() => null);
+        if (snap && snap.hasInput) break;
+        if (snap && snap.loggedOut) {
+          loggedOutSince = loggedOutSince || Date.now();
+          if (Date.now() - loggedOutSince > 3000) break;
+        }
+        await sleep(400);
       }
-      await sleep(400);
+      if (!snap || !snap.hasInput) {
+        if (snap && snap.loggedOut) throw new ChatError(`${provider.name} account is not logged in. Open the web interface and log in.`, 401, 'not_logged_in');
+        throw new ChatError(`Prompt box not found on ${page.url()} (selector: ${sel.input}). The site may have changed or needs a login/captcha — open the browser in the web UI to check.`, 502, 'input_not_found');
+      }
+      // Some sites (e.g. ChatGPT) allow anonymous chats: refuse instead of silently using a guest session.
+      if (snap.loggedOut) throw new ChatError(`${provider.name} account is not logged in. Open the web interface and log in.`, 401, 'not_logged_in');
+      return snap;
+    };
+    let before = await waitForInput();
+
+    if (wantModel) {
+      const r = await selectModel(page, provider, wantModel, (m) => log(account, m));
+      if (r === null && provider.modelUrl) {
+        log(account, `no model menu found — opening ${provider.modelUrl.replace('{model}', wantModel)}`);
+        await page.goto(provider.modelUrl.replace('{model}', encodeURIComponent(wantModel)), { waitUntil: 'domcontentloaded', timeout: 45000 });
+        before = await waitForInput();
+      } else if (r === null) {
+        log(account, `"${wantModel}" requested but ${provider.name} has no model menu configured — using the site's default`);
+      }
+      if (r && r.changed) before = (await page.evaluate(pageSnapshot, sel).catch(() => null)) || before;
     }
-    if (!before || !before.hasInput) {
-      if (before && before.loggedOut) throw new ChatError(`${provider.name} account is not logged in. Open the web interface and log in.`, 401, 'not_logged_in');
-      throw new ChatError(`Prompt box not found on ${page.url()} (selector: ${sel.input}). The site may have changed or needs a login/captcha — open the browser in the web UI to check.`, 502, 'input_not_found');
-    }
-    // Some sites (e.g. ChatGPT) allow anonymous chats: refuse instead of silently using a guest session.
-    if (before.loggedOut) throw new ChatError(`${provider.name} account is not logged in. Open the web interface and log in.`, 401, 'not_logged_in');
 
     await fillInput(page, input, prompt);
     await sleep(250);
@@ -287,9 +301,17 @@ async function saveDebug(store, account, page, err) {
   account.debugAt = Date.now();
 }
 
-function isAlias(model, account, provider) {
-  const m = String(model).toLowerCase();
-  return !m || m === 'default' || m === account.slug || m === provider.id || m === `${provider.id}/${account.slug}`;
+/**
+ * The model to select for this request, or null for "whatever the site uses".
+ * Accepts "opus 4.1", "claude/opus-4-1", "<account-slug>/opus-4-1", …
+ */
+function requestedModel(model, account, provider) {
+  let m = String(model || '').trim();
+  for (const prefix of [`${account.slug}/`, `${provider.id}/`]) if (m.toLowerCase().startsWith(prefix)) m = m.slice(prefix.length);
+  const low = m.toLowerCase();
+  if (!low || low === 'default' || low === account.slug || low === provider.id) return null;
+  if (!require('./models').modelTokens(m).length) return null; // e.g. just "claude" or "gpt"
+  return m;
 }
 
 /**

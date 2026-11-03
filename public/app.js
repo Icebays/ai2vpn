@@ -140,7 +140,8 @@ function renderAccounts() {
       <div>${statusBadge(a)}</div>
       <div>
         <div class="kv"><span>Base URL</span><code class="copyable" data-copy="${esc(a.endpoints.base)}">${esc(a.endpoints.base)}</code></div>
-        <div class="kv"><span>Model</span><code class="copyable" data-copy="${esc(a.slug)}">${esc(a.slug)}</code></div>
+        <div class="kv"><span>Model</span><code class="copyable" data-copy="${esc(a.slug)}">${esc(a.slug)}</code>
+          <button class="btn small" data-act="models" title="Models this account can use">${a.models.length ? `${a.models.length} models` : 'Models…'}</button></div>
         <div class="kv"><span>API key</span><code class="copyable" data-copy="${esc(a.apiKey)}">${esc(mask(a.apiKey))}</code></div>
       </div>
       <div class="acc-stats">${a.stats.requests || 0} requests · ${a.stats.errors || 0} errors · last used ${timeAgo(a.stats.lastUsed)}</div>
@@ -169,6 +170,7 @@ $('#accounts').addEventListener('click', async (e) => {
   if (act === 'test') openPlayground(a);
   if (act === 'check') checkLogin(a, b);
   if (act === 'more') openAccountMenu(a);
+  if (act === 'models') openModels(a);
 });
 
 async function checkLogin(a, btn) {
@@ -290,6 +292,39 @@ function openLogin(a) {
     busy(false);
   };
   $('#lg-browser', m.el).onclick = () => { m.close(); openBrowser(a); };
+}
+
+function openModels(a) {
+  const render = (acc, note = '') => {
+    const rows = [{ id: acc.slug, label: `Site default (whatever is selected in ${acc.providerName})` }, ...acc.models.map((m) => ({ id: `${acc.slug}/${m.id}`, label: m.label }))];
+    return `<div class="modal-body">
+      <h3>Models — ${esc(acc.name)}</h3>
+      <p class="muted small">Put one of these in the API's <code>model</code> field. ai2vpn opens ${esc(acc.providerName)}'s model menu and picks the matching entry before sending.
+        Loose names work too, e.g. <code>opus 4.1</code>, <code>gpt-5-thinking</code>, <code>2.5 pro</code>. An unknown name returns an error listing what the site offers.</p>
+      <div class="table-wrap"><table class="table"><thead><tr><th>model</th><th>Menu entry</th></tr></thead><tbody>
+        ${rows.map((r) => `<tr><td><code class="copyable" data-copy="${esc(r.id)}">${esc(r.id)}</code></td><td>${esc(r.label)}</td></tr>`).join('')}
+      </tbody></table></div>
+      ${note ? `<div class="notice warn small" style="margin-top:10px">${esc(note)}</div>` : ''}
+      <p class="muted small">${acc.modelsAt ? `Read from the site ${timeAgo(acc.modelsAt)}.` : 'Not read from the site yet.'}</p>
+      <div class="actions right"><button class="btn ghost" data-close>Close</button><button class="btn primary" id="md-refresh">Read models from ${esc(acc.providerName)}</button></div></div>`;
+  };
+  const m = modal(render(a));
+  m.el.addEventListener('click', async (e) => {
+    const c = e.target.closest('[data-copy]');
+    if (c) return copy(c.dataset.copy);
+    if (e.target.id !== 'md-refresh') return;
+    e.target.disabled = true;
+    e.target.textContent = 'Opening the model menu…';
+    try {
+      const r = await api(`/api/accounts/${a.id}/models`, { body: {} });
+      m.el.innerHTML = render(r.account, r.note);
+      loadAccounts();
+    } catch (err) {
+      toast(err.message, true);
+      e.target.disabled = false;
+      e.target.textContent = 'Retry';
+    }
+  });
 }
 
 function openCookies(a) {
@@ -426,6 +461,7 @@ function openBrowser(a) {
 function openPlayground(a) {
   const m = modal(`<div class="modal-body playground">
     <h3>Test — ${esc(a.name)}</h3>
+    <label>Model<select id="pg-model"><option value="${esc(a.slug)}">Site default</option>${a.models.map((x) => `<option value="${esc(a.slug + '/' + x.id)}">${esc(x.label)}</option>`).join('')}</select></label>
     <label>Prompt<textarea id="pg-in">Say hello and tell me which model you are in one sentence.</textarea></label>
     <label>Files <span class="muted small">(optional — images, PDF, documents, code… up to 10)</span><input type="file" id="pg-files" multiple></label>
     <label class="check"><input type="checkbox" id="pg-stream" checked> Stream</label>
@@ -436,9 +472,10 @@ function openPlayground(a) {
     <h4>curl</h4><pre class="code" id="pg-curl"></pre>
     <div class="actions right"><button class="btn ghost" data-close>Close</button></div></div>`, { onClose: () => ctl && ctl.abort() });
   let ctl = null;
-  const curl = () => `curl ${a.endpoints.base}/chat/completions \\\n  -H "Authorization: Bearer ${a.apiKey}" \\\n  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify({ model: a.slug, messages: [{ role: 'user', content: $('#pg-in', m.el).value }] }).replace(/'/g, "'\\''")}'`;
+  const curl = () => `curl ${a.endpoints.base}/chat/completions \\\n  -H "Authorization: Bearer ${a.apiKey}" \\\n  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify({ model: $('#pg-model', m.el).value, messages: [{ role: 'user', content: $('#pg-in', m.el).value }] }).replace(/'/g, "'\\''")}'`;
   $('#pg-curl', m.el).textContent = curl();
   $('#pg-in', m.el).addEventListener('input', () => ($('#pg-curl', m.el).textContent = curl()));
+  $('#pg-model', m.el).addEventListener('change', () => ($('#pg-curl', m.el).textContent = curl()));
   $('#pg-watch', m.el).onclick = () => openBrowser(a);
   $('#pg-go', m.el).onclick = async () => {
     const out = $('#pg-out', m.el);
@@ -468,7 +505,7 @@ function openPlayground(a) {
         method: 'POST',
         signal: ctl.signal,
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${a.apiKey}` },
-        body: JSON.stringify({ model: a.slug, stream, messages: [{ role: 'user', content: userContent }] }),
+        body: JSON.stringify({ model: $('#pg-model', m.el).value, stream, messages: [{ role: 'user', content: userContent }] }),
       });
       if (!stream) {
         const j = await r.json();

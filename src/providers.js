@@ -25,8 +25,10 @@
  * loginUrl      (optional) where "Direct login" starts (defaults to homeUrl)
  * loginButton   (optional) button that opens the sign-in form from a landing page
  * stableMs      how long the reply must stay unchanged to count as finished
- * modelUrl      (optional) URL template used when a request names a model,
- *               e.g. "https://chatgpt.com/?model={model}"
+ * modelUrl      (optional) URL template used when a request names a model and the model menu
+ *               can't be used, e.g. "https://chatgpt.com/?model={model}"
+ * Model menu fields (selectors.modelButton / modelOption, moreModels, modelToggles,
+ * staticModels) are documented in src/models.js.
  */
 const BUILTIN = {
   chatgpt: {
@@ -48,6 +50,8 @@ const BUILTIN = {
       loggedOut: 'button[data-testid="login-button"]',
       attach: 'button[aria-label*="Add files" i], button[aria-label*="Attach" i], #composer-plus-btn',
       attachMenu: '[role="menuitem"]:has-text("Add photos & files"), [role="menuitem"]:has-text("Upload")',
+      modelButton: 'button[data-testid="model-switcher-dropdown-button"], button[aria-label*="Model selector" i]',
+      modelOption: '[role="menuitem"], [role="menuitemradio"], [data-testid^="model-switcher-"][role]',
     },
     loggedOutUrl: '/auth/login',
     stableMs: 1500,
@@ -71,6 +75,7 @@ const BUILTIN = {
       fileInput: 'input[type="file"][data-testid="file-upload"], input[type="file"]',
       attach: 'button[aria-label*="Add files" i], button[aria-label*="Attach" i], button[data-testid="input-menu-plus"]',
       attachMenu: '[role="menuitem"]:has-text("Upload a file"), [role="menuitem"]:has-text("Add files")',
+      modelButton: 'button[data-testid="model-selector-dropdown"], button[aria-haspopup][aria-label*="model" i]',
     },
     loggedOutUrl: '/login',
     stableMs: 1500,
@@ -93,6 +98,8 @@ const BUILTIN = {
       attach: 'button[aria-label*="upload file menu" i], button[aria-label*="Add files" i], button.upload-card-button',
       attachMenu: 'button[data-test-id="local-images-files-uploader-button"], [role="menuitem"]:has-text("Upload files")',
       uploading: 'mat-progress-spinner, .loading-spinner, [role="progressbar"]',
+      modelButton: 'button[data-test-id="bard-mode-menu-button"], button.gds-mode-switch-button, button[aria-haspopup][aria-label*="mode" i]',
+      modelOption: '[role="menuitem"], [role="menuitemradio"], button.mat-mdc-menu-item',
     },
     loggedOutUrl: 'accounts\\.google\\.com',
     stableMs: 2000,
@@ -112,6 +119,8 @@ const BUILTIN = {
       content: '.markdown-container, .markdown',
       exclude: 'button, .segment-assistant-actions, .toolcall-container, .thinking-container',
       loggedOut: '.login-button, button.login',
+      modelButton: '.model-select, .current-model, [class*="model-name"]',
+      modelOption: '[role="menuitem"], [role="option"], [class*="model-item"]',
     },
     stableMs: 2500,
   },
@@ -133,6 +142,9 @@ const BUILTIN = {
     },
     loggedOutUrl: '/sign_in|/login',
     stableMs: 3000,
+    // DeepSeek has no model menu: "DeepThink" switches to the reasoning model (R1).
+    modelToggles: [{ label: 'DeepThink', selector: 'div[role="button"]:has-text("DeepThink"), button:has-text("DeepThink")', match: 'reason|r1|think' }],
+    staticModels: ['deepseek-chat', 'deepseek-reasoner'],
   },
   grok: {
     id: 'grok',
@@ -149,6 +161,7 @@ const BUILTIN = {
       content: '.response-content-markdown, .prose',
       exclude: 'button, .thinking-container',
       loggedOut: 'a[href*="sign-in"], a[href*="accounts.x.ai"]',
+      modelButton: 'button[aria-label="Model select"], button#model-select-trigger',
     },
     stableMs: 2500,
   },
@@ -167,6 +180,7 @@ const BUILTIN = {
       content: '.markdown-content-container, .markdown-prose, .markdown',
       exclude: 'button, .thinking-block, [class*="think"]',
       loggedOut: 'button.login-button, a[href*="/auth"]',
+      modelButton: '#model-selector-0-button, button[aria-haspopup][aria-label*="model" i]',
     },
     stableMs: 2500,
   },
@@ -258,7 +272,9 @@ function mockProvider() {
       loggedOut: '#login',
       attach: '#attach',
       uploading: '.uploading',
+      modelButton: '#model-btn',
     },
+    modelToggles: [{ label: 'Think', selector: '#think', match: 'think|reason' }],
     stableMs: 800,
   };
 }
