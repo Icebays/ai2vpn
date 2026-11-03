@@ -69,6 +69,37 @@ print(r.choices[0].message.content)
 
 For ChatGPT, a `model` value that isn't an alias (for example `gpt-5`) is passed to `chatgpt.com/?model=…`.
 
+## Choosing the model
+
+Put the model in the API's `model` field. ai2vpn opens the site's own model menu and clicks the matching entry before sending, including entries under "More models" / "Legacy models" submenus.
+
+- **Loose names work:** `claude-opus-4-1`, `opus 4.1` and `Opus-4.1` all pick "Opus 4.1"; `gpt-5-thinking` picks "GPT-5 Thinking"; `2.5 pro` picks Gemini 2.5 Pro.
+- **Default:** use the account's slug (e.g. `claude`) to keep whatever model the site currently has selected.
+- **DeepSeek** has no model menu: `deepseek-reasoner` (or anything with `r1` / `think`) turns on DeepThink, and `deepseek-chat` turns it off.
+- **Unknown names** return `400 model_not_found` listing what the site offers.
+- **Master key:** use `<account>/<model>`, e.g. `claude/opus-4-1`.
+
+**Models** on an account card reads the site's menu and lists the names. They also appear in `GET /v1/models` as `<account>/<model>`.
+
+## Sandbox: Claude Code, Codex, Gemini CLI
+
+`docker compose up -d` also starts **ai2vpn-sandbox**, a separate container with Claude Code, Codex CLI and Gemini CLI, plus git, Python, Node and build tools. Open it from the web UI's **Sandbox** tab, which is a terminal running tmux, so sessions keep running after you close the page.
+
+- **Network:** it shares ai2vpn's network, so all its traffic goes through the VPN and kill switch. It has no network-admin rights, so it can't change them, even with `sudo`.
+- **Logins:** use your subscriptions, no API keys needed. `claude` signs in with your Claude Pro/Max account, `codex` with "Sign in with ChatGPT", and `gemini` with Google. For CLIs whose sign-in link sends you back to `localhost`, open the link in the tab's **login browser**: it shares the sandbox's network, so the callback reaches the CLI.
+- **Storage:** projects live in `./workspace` and CLI logins in `./sandbox-home`.
+- **Updates:** run `update-clis` in the terminal to update all three CLIs.
+- **Security:** the terminal is only reachable through ai2vpn's admin login. It listens on a private socket, not a network port.
+
+## Updates
+
+**Settings → Updates** checks GitHub for a newer version of ai2vpn: `icebays/ai2vpn`, default branch, every 6 hours. It shows what changed, and **Update now** installs it inside the running container.
+
+- **How:** the new code goes to `/data/app/releases/<commit>`, and only the ai2vpn process restarts. The VPN reconnects, and the sandbox keeps running.
+- **If the new version crashes on start,** ai2vpn rolls back to the version built into the image automatically. There is also a **Roll back** button.
+- **Rebuild needed:** if an update changes the Dockerfile, the startup scripts or the sandbox, the page says so. For those parts run `git pull && docker compose up -d --build` on the host.
+- **Options:** automatic installation when idle, another repository or branch (e.g. your fork), and a GitHub token for private repositories.
+
 ## Files and images
 
 You can attach any file the chat site accepts: images, PDF, Word/Excel/PowerPoint, text, code, CSV, zip and so on. Use the standard OpenAI content parts:
@@ -135,6 +166,8 @@ Chat sites change their markup often. Every provider is described by CSS selecto
 | `MAX_QUEUE` | `20` | Maximum queued requests per account |
 | `MAX_UPLOAD_MB`, `MAX_FILES_PER_REQUEST` | `50`, `10` | Attachment limits |
 | `FILE_TTL_HOURS` | `24` | How long `/v1/files` uploads are kept |
+| `UPDATE_REPO`, `UPDATE_BRANCH`, `UPDATE_GITHUB_TOKEN` | `icebays/ai2vpn`, default branch, — | Where updates come from (also settable in the UI) |
+| `SANDBOX_SUDO` | `true` | Allow `sudo` inside the sandbox |
 
 Everything is stored in `/data` (`./data` on the host): `config.json` (accounts, keys, VPN settings, saved sign-ins), `profiles/<id>` (browser profiles, i.e. your logged-in sessions), and `vpn/`. **Treat this folder as a secret.**
 
@@ -155,7 +188,7 @@ ADMIN_PASSWORD=dev HEADLESS=true npm start
 ## Notes and limits
 
 - **Use your own accounts.** Driving a consumer chat UI through automation can be against a provider's terms of service, and providers may rate-limit, challenge or suspend accounts. The official APIs are the supported route for production workloads. You are responsible for how you use this.
-- **No tool or function calling**, and sampling parameters (`temperature`, …) are ignored. That also means coding agents such as Claude Code or Codex can't run on top of this API; both of those can sign in with your Claude / ChatGPT subscription directly.
+- **No tool or function calling**, and sampling parameters (`temperature`, …) are ignored. That also means coding agents such as Claude Code or Codex can't run on top of this API. Use the **sandbox** instead, where they sign in with your subscription.
 - **Captchas, email codes and passkeys** can't be completed automatically. Direct login stops and asks you to finish in the remote browser, or to type the code into the dialog.
 - **Google often blocks sign-in from automated browsers.** If Gemini's sign-in is rejected, use **Import cookies**.
 - **Do not expose port 8080 to the internet without TLS.** Put it behind a reverse proxy (Caddy, Traefik, nginx) with HTTPS. Anyone with the admin password controls your accounts.

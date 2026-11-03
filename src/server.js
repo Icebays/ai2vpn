@@ -16,6 +16,7 @@ const { parseCookieText } = require('./cookies');
 const { directLogin } = require('./login');
 const { discoverModels } = require('./models');
 const sandbox = require('./sandbox');
+const { Updater, RESTART_CODE } = require('./updater');
 const { pageSnapshot } = require('./extract');
 const { newApiKey, randomId, slugify } = require('./util');
 
@@ -430,6 +431,24 @@ if (process.env.ENABLE_MOCK_PROVIDER === '1') {
   app.use('/__mock', express.static(path.join(__dirname, '..', 'test', 'mock-chat')));
 }
 
+// ---------------- in-app updates from GitHub ----------------
+const updater = new Updater(store, {
+  onRestart: () => shutdown('update', RESTART_CODE),
+  isIdle: () => [...browsers.sessions.values()].every((x) => !x.busy) && store.accounts.every((a) => api.queue.size(a.id) === 0),
+});
+const upView = () => updater.view();
+admin.get('/update', (req, res) => res.json(upView()));
+admin.put(
+  '/update/config',
+  wrap((req, res) => {
+    updater.setConfig(req.body || {});
+    res.json(upView());
+  })
+);
+admin.post('/update/check', wrap(async (req, res) => res.json(await updater.check())));
+admin.post('/update/install', wrap(async (req, res) => res.json(await updater.install())));
+admin.post('/update/rollback', wrap(async (req, res) => res.json(await updater.rollback())));
+
 // ---------------- sandbox web terminal (proxied to the sandbox container) ----------------
 app.get('/api/sandbox', auth.middleware(), async (req, res) => res.json({ running: await sandbox.available() }));
 app.use(sandbox.PREFIX, (req, res, next) => {
@@ -478,18 +497,20 @@ server.listen(PORT, '0.0.0.0', () => {
 });
 
 let stopping = false;
-async function shutdown(sig) {
+async function shutdown(sig, exitCode = 0) {
   if (stopping) return;
   stopping = true;
   console.log(`[ai2vpn] ${sig}: shutting down`);
+  if (exitCode === RESTART_CODE && vpn.state.status === 'connected') store.vpn.resumeAfterRestart = true; // reconnect after the update
   try {
     store.flush();
   } catch (e) {}
-  const t = setTimeout(() => process.exit(0), 8000);
+  const t = setTimeout(() => process.exit(exitCode), 8000);
+  server.close();
   await browsers.closeAll().catch(() => {});
   await vpn.shutdown().catch(() => {});
   clearTimeout(t);
-  process.exit(0);
+  process.exit(exitCode);
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));

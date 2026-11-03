@@ -84,7 +84,12 @@ class VpnManager {
       this.log('base routing setup failed: ' + e.message);
     }
     await this._applyKillSwitch().catch((e) => this.log('kill switch: ' + e.message));
-    if (this.cfg.mode !== 'none' && this.cfg.autoConnect) {
+    const resume = !!this.store.vpn.resumeAfterRestart; // was connected before an in-app update
+    if (resume) {
+      delete this.store.vpn.resumeAfterRestart;
+      this.store.save();
+    }
+    if (this.cfg.mode !== 'none' && (this.cfg.autoConnect || resume)) {
       this.connect().catch(() => {});
     } else {
       this.refreshIp().catch(() => {});

@@ -80,7 +80,7 @@ async function showApp() {
   $('#login-view').hidden = true;
   $('#app-view').hidden = false;
   state.providers = await api('/api/providers');
-  await Promise.all([loadAccounts(), loadVpn(), loadSettings()]);
+  await Promise.all([loadAccounts(), loadVpn(), loadSettings(), loadUpdate()]);
   switchTab(location.hash.slice(1) || 'accounts');
 }
 $('#login-form').addEventListener('submit', async (e) => {
@@ -106,7 +106,7 @@ function switchTab(tab) {
   history.replaceState(null, '', '#' + tab);
   if (tab === 'api') renderApi();
   if (tab === 'vpn') renderVpn();
-  if (tab === 'settings') renderSettings();
+  if (tab === 'settings') { renderSettings(); loadUpdate(); }
   if (tab === 'sandbox') renderSandbox();
 }
 
@@ -766,13 +766,102 @@ $('#pw-save').onclick = async () => {
   catch (e) { toast(e.message, true); }
 };
 
+// ---------------- updates ----------------
+let updFormFilled = false;
+async function loadUpdate() {
+  try { state.update = await api('/api/update'); } catch (e) { return; }
+  renderUpdateBanner();
+  if (state.tab === 'settings') renderUpdate();
+}
+function shortSha(x) { return x ? x.slice(0, 7) : ''; }
+function renderUpdateBanner() {
+  const u = state.update;
+  const b = $('#update-banner');
+  if (!u || u.status !== 'available') { b.hidden = true; return; }
+  b.hidden = false;
+  b.innerHTML = `<span>⬆ Update available: <b>${esc(shortSha(u.latest.sha))}</b> ${esc(u.latest.message)}</span>
+    <button class="btn small primary" id="banner-update">Update now</button><a href="#settings" class="small" id="banner-details">Details</a>`;
+  $('#banner-update').onclick = () => doUpdate('install');
+  $('#banner-details').onclick = (e) => { e.preventDefault(); switchTab('settings'); $('#updates-card').scrollIntoView({ behavior: 'smooth' }); };
+}
+function renderUpdate() {
+  const u = state.update;
+  if (!u) return;
+  if (!updFormFilled) {
+    updFormFilled = true;
+    $('#upd-repo').value = u.config.repo;
+    $('#upd-branch').value = u.config.branch;
+    $('#upd-token').value = u.config.hasToken ? '••••••••' : '';
+    $('#upd-auto').checked = u.config.auto;
+    $('#upd-interval').value = u.config.intervalHours;
+  }
+  const inst = u.installed;
+  const statusText = { idle: 'not checked yet', checking: 'checking…', 'up-to-date': 'up to date ✓', available: 'update available', installing: 'installing…', restarting: 'restarting…', error: 'error' }[u.status] || u.status;
+  const rows = [
+    ['Running', inst.source === 'update' ? `update ${esc(shortSha(inst.sha))} <span class="muted">${esc(inst.message)}</span>` : `version built into the image${inst.sha ? ' ' + esc(shortSha(inst.sha)) : ''}`],
+    ['Latest', u.latest ? `<a href="${esc(u.latest.url || '#')}" target="_blank">${esc(shortSha(u.latest.sha))}</a> <span class="muted">${esc(u.latest.message)}</span>` : '—'],
+    ['Status', `<b>${esc(statusText)}</b>${u.error ? ` <span class="error">${esc(u.error)}</span>` : ''}`],
+    ['Last check', u.lastCheck ? timeAgo(u.lastCheck) : 'never'],
+  ];
+  $('#upd-status').innerHTML = rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join('');
+  $('#upd-rebuild').hidden = !u.rebuildNeeded.length || u.status !== 'available';
+  $('#upd-rebuild').innerHTML = `This update also changes files that are part of the Docker image (${u.rebuildNeeded.map(esc).join(', ')}). "Update now" updates the app; for those parts run <code>git pull &amp;&amp; docker compose up -d --build</code> on the host.`;
+  let ch = '';
+  if (u.status === 'available') {
+    if (u.commits.length) ch += `<b>What's new</b><ul>${u.commits.map((c) => `<li><code>${esc(c.sha)}</code> ${esc(c.message)}</li>`).join('')}</ul>`;
+    ch += `<details><summary class="muted">${u.changedCount} changed file(s)</summary><ul>${u.changes.map((c) => `<li><code>${esc(c.path)}</code> <span class="muted">${c.change}</span></li>`).join('')}</ul></details>`;
+  }
+  $('#upd-changes').innerHTML = ch;
+  $('#upd-install').hidden = u.status !== 'available';
+  $('#upd-rollback').hidden = !u.canRollback;
+  $('#upd-check').disabled = u.busy;
+  const log = $('#upd-log');
+  log.textContent = (u.log || []).join('\n') || 'No activity yet.';
+}
+async function doUpdate(action) {
+  const btns = ['#upd-check', '#upd-install', '#upd-rollback'].map((x) => $(x));
+  if (action === 'rollback' && !confirm('Go back to the version built into the Docker image?')) return;
+  btns.forEach((b) => (b.disabled = true));
+  try {
+    if (action === 'check') { state.update = await api('/api/update/check', { body: {} }); toast(state.update.status === 'available' ? 'Update available' : 'Up to date'); }
+    else {
+      const r = await api(`/api/update/${action}`, { body: {} });
+      toast(r.message || 'Done');
+      if (r.status === 'restarting') return waitForRestart();
+      state.update = r;
+    }
+  } catch (e) { toast(e.message, true); await loadUpdate(); }
+  btns.forEach((b) => (b.disabled = false));
+  renderUpdate(); renderUpdateBanner();
+}
+async function waitForRestart() {
+  const b = $('#update-banner');
+  b.hidden = false;
+  b.innerHTML = '<span>⟳ ai2vpn is restarting with the new version… this page reloads automatically.</span>';
+  await new Promise((r) => setTimeout(r, 2500));
+  for (let i = 0; i < 120; i++) {
+    try { const r = await fetch('/healthz', { cache: 'no-store' }); if (r.ok) { location.reload(); return; } } catch (e) {}
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  b.innerHTML = '<span class="error">ai2vpn did not come back. Check <code>docker logs ai2vpn</code>.</span>';
+}
+$('#upd-check').onclick = () => doUpdate('check');
+$('#upd-install').onclick = () => doUpdate('install');
+$('#upd-rollback').onclick = () => doUpdate('rollback');
+$('#upd-save').onclick = async () => {
+  try {
+    state.update = await api('/api/update/config', { method: 'PUT', body: { repo: $('#upd-repo').value, branch: $('#upd-branch').value, token: $('#upd-token').value, auto: $('#upd-auto').checked, intervalHours: $('#upd-interval').value } });
+    updFormFilled = false; renderUpdate(); toast('Saved');
+  } catch (e) { toast(e.message, true); }
+};
+
 // ---------------- polling ----------------
 setInterval(() => {
   if ($('#app-view').hidden || document.hidden) return;
   if (state.tab === 'vpn') loadVpn().catch(() => {});
   else if (state.tab === 'accounts' && !$('.modal-backdrop')) loadAccounts().catch(() => {});
 }, 5000);
-setInterval(() => { if (!$('#app-view').hidden && !document.hidden) loadVpn().catch(() => {}); }, 30000);
+setInterval(() => { if (!$('#app-view').hidden && !document.hidden) { loadVpn().catch(() => {}); loadUpdate(); } }, 30000);
 
 // ---------------- boot ----------------
 api('/api/me').then((r) => (r.loggedIn ? showApp() : showLogin())).catch(showLogin);

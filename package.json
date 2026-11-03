@@ -1,12 +1,12 @@
 {
   "name": "ai2vpn",
   "version": "1.0.0",
-  "description": "Self-hosted gateway: log in to your own AI chat accounts (ChatGPT, Claude, Gemini, Kimi, DeepSeek, ...) inside a container, route everything through a VPN, and expose each account as an OpenAI-compatible API.",
+  "description": "Self-hosted gateway: log in to your own AI chat accounts (ChatGPT, Claude, Gemini, Kimi, DeepSeek, ...) inside a container, route everything through a VPN, expose each account as an OpenAI-compatible API, and run Claude Code / Codex in a VPN'd sandbox.",
   "main": "src/server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/e2e.js"
+    "test": "node test/e2e.js && node test/update.js"
   },
   "engines": {
     "node": ">=20"

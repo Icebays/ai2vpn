@@ -37,6 +37,7 @@
     </div>
   </header>
 
+  <div id="update-banner" class="update-banner" hidden></div>
   <main>
     <!-- Accounts -->
     <section data-view="accounts">
@@ -230,6 +231,35 @@ sudo apt install …</pre>
           </div>
         </div>
       </div>
+      <div class="card" id="updates-card">
+        <h3>Updates</h3>
+        <div class="two-col upd">
+          <div>
+            <div class="status-grid" id="upd-status"></div>
+            <div class="notice warn small" id="upd-rebuild" hidden></div>
+            <div id="upd-changes" class="small"></div>
+            <div class="actions">
+              <button class="btn" id="upd-check">Check for updates</button>
+              <button class="btn primary" id="upd-install" hidden>Update now</button>
+              <button class="btn danger" id="upd-rollback" hidden>Roll back to image version</button>
+            </div>
+          </div>
+          <div>
+            <div class="row">
+              <label class="grow">GitHub repository<input id="upd-repo" placeholder="owner/name"></label>
+              <label class="grow">Branch<input id="upd-branch" placeholder="default branch"></label>
+            </div>
+            <label>GitHub token <span class="muted small">(only for private repositories)</span><input id="upd-token" type="password" autocomplete="off"></label>
+            <div class="row">
+              <label class="check grow"><input type="checkbox" id="upd-auto"> Install updates automatically (when idle)</label>
+              <label style="max-width:160px">Check every (hours)<input id="upd-interval" type="number" min="1"></label>
+            </div>
+            <div class="actions"><button class="btn" id="upd-save">Save</button></div>
+          </div>
+        </div>
+        <details><summary class="muted small">Update log</summary><pre class="log" id="upd-log"></pre></details>
+      </div>
+
       <div class="card">
         <h3>Provider overrides</h3>
         <p class="muted small">Chat sites change their HTML. Fix selectors here without rebuilding, or add a new site under a new id. JSON object keyed by provider id; fields are merged into the built-in definition.

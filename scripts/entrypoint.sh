@@ -22,4 +22,4 @@ if [ "$HEADLESS" != "true" ]; then
   sleep 0.5
 fi
 
-exec node /app/src/server.js
+exec /app/scripts/run-app.sh
