@@ -28,6 +28,7 @@
       <button data-tab="accounts" class="active">Accounts</button>
       <button data-tab="vpn">VPN</button>
       <button data-tab="api">API</button>
+      <button data-tab="sandbox">Sandbox</button>
       <button data-tab="settings">Settings</button>
     </nav>
     <div class="top-right">
@@ -165,6 +166,41 @@
           <button data-lang="node">Node.js</button>
         </div>
         <pre class="code" id="code-example"></pre>
+      </div>
+    </section>
+
+    <!-- Sandbox -->
+    <section data-view="sandbox" hidden>
+      <div class="section-head">
+        <div>
+          <h2>Sandbox</h2>
+          <p class="muted">A separate container with Claude Code, Codex and Gemini CLI. It shares ai2vpn's network, so everything it does goes through the VPN. Your files are in <code>./workspace</code> on the host.</p>
+        </div>
+        <div class="row">
+          <a class="btn" href="/sandbox/term/" target="_blank">Open in new tab</a>
+          <button class="btn" id="sb-reload">Reconnect</button>
+        </div>
+      </div>
+      <div id="sb-missing" class="notice warn" hidden>The sandbox container isn't running. Start it with <code>docker compose up -d --build sandbox</code>.</div>
+      <div class="sandbox-grid">
+        <div class="card term-card"><iframe id="sb-frame" title="Sandbox terminal"></iframe></div>
+        <div class="card">
+          <h3>Log in to the CLIs</h3>
+          <ol class="small sb-steps">
+            <li><b>Claude Code</b>: type <code>claude</code> and choose your Claude subscription (Pro/Max). Open the link it shows, sign in, then paste the code back into the terminal.</li>
+            <li><b>Codex</b>: type <code>codex</code> and choose <i>Sign in with ChatGPT</i>. Its link sends you back to <code>localhost:1455</code>, so open it in the <b>login browser</b> below (it shares the sandbox's network).</li>
+            <li><b>Gemini CLI</b>: type <code>gemini</code> and choose <i>Login with Google</i>. Use the login browser for its link as well.</li>
+          </ol>
+          <label>Login browser
+            <form id="sb-login-form" class="row"><input id="sb-login-url" placeholder="Paste the login link from the terminal"><button class="btn primary">Open</button></form>
+          </label>
+          <h4>Useful commands</h4>
+          <pre class="code small">update-clis      # update the 3 CLIs
+Ctrl-b c         # new tmux window
+Ctrl-b n / p     # next / previous window
+sudo apt install …</pre>
+          <p class="muted small">Sessions keep running when you close this page (tmux). Logins are stored in <code>./sandbox-home</code>.</p>
+        </div>
       </div>
     </section>
 

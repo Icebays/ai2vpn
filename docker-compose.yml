@@ -15,6 +15,7 @@ services:
       # VPN_MODE: external                     # set when the network is handled by gluetun / the host
     volumes:
       - ./data:/data                           # accounts, browser profiles (logins), VPN config
+      - sandbox-run:/run/sandbox               # private socket to the sandbox's web terminal
     cap_add:
       - NET_ADMIN                              # needed to bring up the VPN + kill switch
     devices:
@@ -25,3 +26,24 @@ services:
       # (only on hosts that have IPv6 enabled — the container fails to start otherwise):
       # - net.ipv6.conf.all.disable_ipv6=1
     shm_size: 1gb                              # Chromium needs more than Docker's 64 MB default
+
+  # Claude Code / Codex / Gemini CLI in their own container. It shares ai2vpn's network, so its
+  # traffic goes through ai2vpn's VPN and kill switch, and it has no rights to change them.
+  # Use it from the web UI → Sandbox tab.
+  sandbox:
+    build: ./sandbox
+    image: ai2vpn-sandbox:latest
+    container_name: ai2vpn-sandbox
+    restart: unless-stopped
+    network_mode: "service:ai2vpn"
+    depends_on: [ai2vpn]
+    environment:
+      TZ: ${TZ:-UTC}
+      SANDBOX_SUDO: ${SANDBOX_SUDO:-true}       # false = no sudo inside the sandbox
+    volumes:
+      - ./workspace:/workspace                 # your projects
+      - ./sandbox-home:/home/coder             # CLI logins (Claude, Codex, Gemini) and settings
+      - sandbox-run:/run/sandbox
+
+volumes:
+  sandbox-run:

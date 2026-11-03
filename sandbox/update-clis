@@ -1,0 +1,8 @@
+#!/bin/sh
+# Install the latest Claude Code, Codex and Gemini CLI into ~/.npm-global (takes precedence over the image's copies).
+set -e
+export NPM_CONFIG_PREFIX="$HOME/.npm-global"
+mkdir -p "$NPM_CONFIG_PREFIX"
+npm install -g @anthropic-ai/claude-code@latest @openai/codex@latest @google/gemini-cli@latest
+echo
+for c in claude codex gemini; do printf '%-8s ' "$c"; "$HOME/.npm-global/bin/$c" --version 2>/dev/null | head -1 || echo '?'; done

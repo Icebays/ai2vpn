@@ -36,4 +36,22 @@ services:
       TZ: ${TZ:-UTC}
     volumes:
       - ./data:/data
+      - sandbox-run:/run/sandbox
     shm_size: 1gb
+
+  sandbox:
+    build: ./sandbox
+    image: ai2vpn-sandbox:latest
+    container_name: ai2vpn-sandbox
+    restart: unless-stopped
+    network_mode: "service:gluetun"           # same network (and VPN) as ai2vpn
+    depends_on: [ai2vpn]
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./workspace:/workspace
+      - ./sandbox-home:/home/coder
+      - sandbox-run:/run/sandbox
+
+volumes:
+  sandbox-run:

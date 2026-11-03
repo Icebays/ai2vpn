@@ -1,0 +1,17 @@
+# ai2vpn sandbox shell
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
+export NPM_CONFIG_PREFIX="$HOME/.npm-global"
+export EDITOR=nano
+alias ll='ls -la'
+alias fd=fdfind
+PS1='\[\e[38;5;141m\]sandbox\[\e[0m\]:\[\e[36m\]\w\[\e[0m\]\$ '
+cd /workspace 2>/dev/null
+if [ -z "$A2V_GREETED" ]; then
+  export A2V_GREETED=1
+  echo "ai2vpn sandbox — your files live in /workspace (./workspace on the host)."
+  echo "  claude      Claude Code   (log in with your Claude Pro/Max account)"
+  echo "  codex       Codex CLI     (\"Sign in with ChatGPT\")"
+  echo "  gemini      Gemini CLI    (log in with Google)"
+  echo "  update-clis update all three to the latest version"
+  echo "Traffic goes through ai2vpn's VPN. tmux: Ctrl-b c = new window, Ctrl-b n = next window."
+fi

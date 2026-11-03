@@ -3,3 +3,5 @@ data
 .git
 .env
 *.log
+workspace
+sandbox-home

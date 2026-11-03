@@ -15,6 +15,7 @@ const { listProviders, resolveProvider, BUILTIN } = require('./providers');
 const { parseCookieText } = require('./cookies');
 const { directLogin } = require('./login');
 const { discoverModels } = require('./models');
+const sandbox = require('./sandbox');
 const { pageSnapshot } = require('./extract');
 const { newApiKey, randomId, slugify } = require('./util');
 
@@ -429,6 +430,13 @@ if (process.env.ENABLE_MOCK_PROVIDER === '1') {
   app.use('/__mock', express.static(path.join(__dirname, '..', 'test', 'mock-chat')));
 }
 
+// ---------------- sandbox web terminal (proxied to the sandbox container) ----------------
+app.get('/api/sandbox', auth.middleware(), async (req, res) => res.json({ running: await sandbox.available() }));
+app.use(sandbox.PREFIX, (req, res, next) => {
+  if (!auth.fromRequest(req)) return res.status(401).type('text').send('Sign in to ai2vpn first.');
+  sandbox.proxyHttp(req, res);
+});
+
 // ---------------- web UI ----------------
 app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html', maxAge: '5m' }));
 
@@ -436,18 +444,26 @@ app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.htm
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 server.on('upgrade', (req, socket, head) => {
+  if (req.url.startsWith(sandbox.PREFIX + '/')) {
+    if (!auth.fromRequest(req)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      return socket.destroy();
+    }
+    return sandbox.proxyUpgrade(req, socket, head);
+  }
   const m = req.url.match(/^\/ws\/viewer\/([\w-]+)/);
   if (!m || !auth.fromRequest(req)) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     return socket.destroy();
   }
-  const account = store.account(m[1]);
+  const account = m[1] === sandbox.LOGIN_BROWSER.id ? sandbox.LOGIN_BROWSER : store.account(m[1]);
   if (!account) {
     socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
     return socket.destroy();
   }
+  const startUrl = new URL(req.url, 'http://x').searchParams.get('url') || '';
   wss.handleUpgrade(req, socket, head, (ws) => {
-    browsers.attachViewer(account, ws).catch((e) => {
+    browsers.attachViewer(account, ws, { url: startUrl }).catch((e) => {
       try {
         ws.send(JSON.stringify({ type: 'error', message: 'Could not start browser: ' + e.message }));
         ws.close();

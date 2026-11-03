@@ -169,7 +169,7 @@ class BrowserManager {
 
   // ---------- Remote viewer (CDP screencast) ----------
 
-  async attachViewer(account, ws) {
+  async attachViewer(account, ws, opts = {}) {
     const ctx = await this.getContext(account);
     const s = this.sessions.get(account.id);
     const viewer = new Viewer(ctx, ws, account, this.store);
@@ -179,7 +179,7 @@ class BrowserManager {
       viewer.dispose();
       this.touch(account.id);
     });
-    await viewer.start();
+    await viewer.start(opts.url);
     return viewer;
   }
 }
@@ -220,11 +220,13 @@ class Viewer {
     if (this.ws.readyState === 1) this.ws.send(JSON.stringify(obj));
   }
 
-  async start() {
+  async start(url) {
     this.ctx.on('page', this._onPage);
     let page = this.ctx.pages().filter((p) => !p.isClosed()).pop();
     if (!page) page = await this.ctx.newPage();
-    if (page.url() === 'about:blank') {
+    if (url && /^https?:\/\//i.test(url)) {
+      await page.goto(url, { waitUntil: 'commit', timeout: 45000 }).catch(() => {});
+    } else if (page.url() === 'about:blank') {
       const provider = resolveProvider(this.store, this.account);
       if (provider.homeUrl && provider.homeUrl !== 'about:blank') {
         await page.goto(provider.homeUrl, { waitUntil: 'commit', timeout: 45000 }).catch(() => {});

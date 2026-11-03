@@ -171,3 +171,12 @@ label.check input { width: auto; margin: 0; }
   .tabs { order: 3; flex-basis: 100%; overflow-x: auto; }
   .browser-bar .tabs-info { display: none; }
 }
+
+/* sandbox */
+.sandbox-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+.term-card { padding: 0; overflow: hidden; background: #0d0f13; }
+.term-card iframe { display: block; width: 100%; height: calc(100vh - 230px); min-height: 420px; border: 0; }
+.sb-steps { padding-left: 18px; margin: 0 0 8px; }
+.sb-steps li { margin-bottom: 8px; }
+.code.small { font-size: 11.5px; padding: 10px; }
+@media (max-width: 1000px) { .sandbox-grid { grid-template-columns: 1fr; } .term-card iframe { height: 70vh; } }

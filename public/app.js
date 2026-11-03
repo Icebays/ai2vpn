@@ -107,7 +107,24 @@ function switchTab(tab) {
   if (tab === 'api') renderApi();
   if (tab === 'vpn') renderVpn();
   if (tab === 'settings') renderSettings();
+  if (tab === 'sandbox') renderSandbox();
 }
+
+// ---------------- sandbox ----------------
+async function renderSandbox(force = false) {
+  const frame = $('#sb-frame');
+  let running = false;
+  try { running = (await api('/api/sandbox')).running; } catch (e) {}
+  $('#sb-missing').hidden = running;
+  if (running && (force || !frame.src)) frame.src = '/sandbox/term/';
+}
+$('#sb-reload').onclick = () => { $('#sb-frame').src = 'about:blank'; setTimeout(() => renderSandbox(true), 100); };
+$('#sb-login-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const url = $('#sb-login-url').value.trim();
+  if (!/^https?:\/\//i.test(url)) return toast('Paste the full https:// link from the terminal', true);
+  openBrowser({ id: '_sandbox', name: 'Login browser', providerName: 'Sandbox', homeUrl: url, _url: url });
+});
 $('#tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) switchTab(b.dataset.tab); });
 $('#vpn-pill').onclick = () => switchTab('vpn');
 
@@ -373,6 +390,10 @@ function openBrowser(a) {
   const root = tpl('tpl-browser');
   let ws = null;
   const m = modal(root, { wide: true, onClose: () => { if (ws) ws.close(); loadAccounts(); } });
+  if (a.id === '_sandbox') {
+    $('[data-act="cookies"]', root).hidden = true;
+    $('[data-act="done"]', root).textContent = 'Close';
+  }
   const canvas = $('canvas', root);
   const ctx = canvas.getContext('2d');
   const screen = $('.browser-screen', root);
@@ -383,7 +404,7 @@ function openBrowser(a) {
   let drawing = false;
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws/viewer/${a.id}`);
+  ws = new WebSocket(`${proto}://${location.host}/ws/viewer/${a.id}${a._url ? '?url=' + encodeURIComponent(a._url) : ''}`);
   ws.binaryType = 'blob';
   const send = (o) => ws.readyState === 1 && ws.send(JSON.stringify(o));
   ws.onmessage = async (ev) => {
@@ -452,7 +473,7 @@ function openBrowser(a) {
     if (['back', 'forward', 'reload', 'home', 'closetab'].includes(act)) send({ type: act });
     if (act === 'tab') send({ type: 'tab', dir: 1 });
     if (act === 'cookies') { m.close(); openCookies(a); }
-    if (act === 'done') { m.close(); checkLogin(a); }
+    if (act === 'done') { m.close(); if (a.id !== '_sandbox') checkLogin(a); }
   });
   setTimeout(() => screen.focus(), 100);
 }
