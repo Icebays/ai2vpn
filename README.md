@@ -23,6 +23,44 @@ You manage everything from the web interface: adding accounts, signing in, the V
 
 ## Quick start
 
+Run the installer and follow the numbered menu:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/icebays/ai2vpn/HEAD/install.sh | bash
+```
+
+Or, from a clone of this repository:
+
+```bash
+./install.sh
+```
+
+```
+  ▲ ai2vpn  AI accounts → VPN → OpenAI-compatible API
+
+Main menu / 主選單
+  1) Install / set up again / 安裝或重新設定
+  2) Update to the latest version / 更新
+  3) Manage: start, stop, logs, backup, sandbox shell / 管理
+  4) Settings: password, port, VPN, sandbox / 設定
+  5) Uninstall / 解除安裝
+  0) Exit / 離開
+```
+
+**Install** checks Docker (and offers to install it on Linux), downloads ai2vpn to `~/ai2vpn`, and then asks for:
+
+- an admin password (or generates one)
+- a free port
+- an optional public URL
+- the VPN mode: built-in, gluetun, or none for now
+- whether to run the sandbox
+
+It writes `.env`, builds and starts the containers, and waits until ai2vpn is healthy. With the built-in VPN it can also load your WireGuard `.conf` or OpenVPN `.ovpn` file and connect right away. At the end it prints the web address and password.
+
+The same actions work as direct commands: `./install.sh install | update | start | stop | restart | status | logs | backup | uninstall`.
+
+<details><summary>Manual setup without the installer</summary>
+
 ```bash
 git clone https://github.com/icebays/ai2vpn && cd ai2vpn
 ```
@@ -35,7 +73,9 @@ cp .env.example .env    # set ADMIN_PASSWORD
 docker compose up -d --build
 ```
 
-Open `http://<host>:8080`, sign in with `ADMIN_PASSWORD`, and then:
+</details>
+
+Then open the web UI, sign in, and:
 
 1. **VPN tab**: pick WireGuard or OpenVPN and your provider. Follow the instructions shown for that provider, paste or load the config, then click **Save & connect**. The pill at the top shows the container's exit IP.
 2. **Accounts tab**: click **+ Add account**, pick the service, then sign in:
