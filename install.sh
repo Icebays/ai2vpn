@@ -1,465 +1,804 @@
 #!/usr/bin/env bash
-# ai2vpn quick start — interactive installer and manager.
+# ai2vpn installer and manager (Linux and macOS)
 #
 #   curl -fsSL https://raw.githubusercontent.com/icebays/ai2vpn/HEAD/install.sh | bash
-#   ./install.sh                 # menu
-#   ./install.sh install|update|start|stop|restart|status|logs|backup|uninstall
 #
-# Environment overrides: A2V_DIR (install folder), A2V_REPO, A2V_BRANCH.
+# Run it in a terminal and it shows a numbered menu (install, manage, settings, backup, uninstall).
+# After installing, open the menu again any time with:   ai2vpn
+# An existing install is found automatically, also in a custom folder (saved location, Docker, common
+# folders incl. NAS volumes; menu 3 → 7 can search the whole disk). Or say where it is with --dir <path>.
+#
+# Without a menu (scripts, automation):
+#   install.sh install   [--dir <path>] [--port <n>] [--branch <name>]   install or update
+#   install.sh status | start | stop | restart | logs | shell
+#   install.sh port <n>                change the web UI / API port
+#   install.sh password <new>          change the admin password
+#   install.sh vpn                     show the VPN status and exit IP
+#   install.sh backup                  back up accounts, logins and settings
+#   install.sh restore <file.tar.gz>   restore a backup
+#   install.sh uninstall [--purge]     remove containers (--purge also deletes all data)
+#   -y / --yes                         answer yes to every question
+set -euo pipefail
 
-set -u
-A2V_REPO="${A2V_REPO:-https://github.com/icebays/ai2vpn.git}"
-A2V_BRANCH="${A2V_BRANCH:-}"
-TTY="${A2V_TTY:-/dev/tty}"          # where answers are read from (works with curl | bash)
-NO_BUILD="${A2V_NO_BUILD:-}"        # testing: use already-built images
+REPO_URL="https://github.com/icebays/ai2vpn"
+REPO_API="https://api.github.com/repos/icebays/ai2vpn"
+# private fork: set GH_TOKEN (a GitHub token with read access) before running
+BRANCH="${BRANCH:-}"            # empty = the repository's default branch
+INSTALL_DIR="${INSTALL_DIR:-}"
+PORT=""
+ACTION=""
+ARG=""
+PURGE=0
+YES=0
 
-# ---------------- output helpers ----------------
-if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; C=$'\e[36m'; N=$'\e[0m'; else B= D= R= G= Y= C= N=; fi
-say()  { printf '%s\n' "$*"; }
-info() { printf '%s›%s %s\n' "$C" "$N" "$*"; }
-ok()   { printf '%s✓%s %s\n' "$G" "$N" "$*"; }
-warn() { printf '%s!%s %s\n' "$Y" "$N" "$*"; }
-err()  { printf '%s✗ %s%s\n' "$R" "$*" "$N" >&2; }
-line() { printf '%s%s%s\n' "$D" "────────────────────────────────────────────────────────" "$N"; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dir) INSTALL_DIR="$2"; shift 2 ;;
+    --port) PORT="$2"; shift 2 ;;
+    --branch) BRANCH="$2"; shift 2 ;;
+    --purge) PURGE=1; shift ;;
+    -y|--yes) YES=1; shift ;;
+    --uninstall) ACTION="uninstall"; shift ;;
+    -h|--help|help) ACTION="help"; shift ;;
+    install|update|status|start|stop|restart|logs|shell|vpn|backup|uninstall|menu) ACTION="$1"; shift ;;
+    port|restore|password) ACTION="$1"; ARG="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+    *) echo "Unknown option: $1 (try --help)" >&2; exit 1 ;;
+  esac
+done
 
-ask() { # ask "Question" default → $REPLY
-  local q="$1" def="${2:-}"
-  if [ -n "$def" ]; then printf '%s %s[%s]%s: ' "$q" "$D" "$def" "$N"; else printf '%s: ' "$q"; fi
-  IFS= read -r REPLY <"$TTY" || REPLY=""
-  [ -z "$REPLY" ] && REPLY="$def"
-  return 0
-}
-ask_secret() {
-  local q="$1" def="${2:-}"
-  printf '%s %s[Enter = %s]%s: ' "$q" "$D" "${3:-keep}" "$N"
-  if [ "$TTY" = /dev/tty ]; then IFS= read -rs REPLY <"$TTY" || REPLY=""; echo; else IFS= read -r REPLY <"$TTY" || REPLY=""; fi
-  [ -z "$REPLY" ] && REPLY="$def"
-  return 0
-}
-yesno() { # yesno "Question" y|n
-  local def="${2:-y}" hint="Y/n"; [ "$def" = n ] && hint="y/N"
-  while :; do
-    printf '%s %s[%s]%s: ' "$1" "$D" "$hint" "$N"
-    IFS= read -r REPLY <"$TTY" || REPLY=""
-    REPLY="${REPLY:-$def}"
-    case "$REPLY" in [yY]*) return 0 ;; [nN]*) return 1 ;; esac
-  done
-}
-choose() { # choose "Title" "opt1" "opt2" … → $CHOICE (1-based); 0 = back/exit
-  local title="$1"; shift
-  local i=1
-  say ""; say "${B}${title}${N}"
-  for o in "$@"; do printf '  %s%d)%s %s\n' "$C" "$i" "$N" "$o"; i=$((i + 1)); done
-  printf '  %s0)%s %s\n' "$C" "$N" "${BACK_LABEL:-Back / 返回}"
-  while :; do
-    printf '%s> %s' "$B" "$N"
-    IFS= read -r CHOICE <"$TTY" || { CHOICE=0; return; }
-    case "$CHOICE" in ''|*[!0-9]*) ;; *) [ "$CHOICE" -ge 0 ] && [ "$CHOICE" -le $# ] && return ;; esac
-    warn "Enter a number 0-$# / 請輸入 0-$#"
-  done
-}
-pause() { printf '%sPress Enter to continue / 按 Enter 繼續…%s' "$D" "$N"; IFS= read -r _ <"$TTY" || true; }
+# ---------------------------------------------------------------- output helpers
+if [ -t 1 ]; then
+  B=$'\033[1m'; D=$'\033[2m'; R=$'\033[0m'; C=$'\033[36m'; G=$'\033[32m'; Y=$'\033[33m'; E=$'\033[31m'; P=$'\033[35m'
+else B=""; D=""; R=""; C=""; G=""; Y=""; E=""; P=""; fi
+info() { printf '%s==>%s %s\n' "$C" "$R" "$*"; }
+ok()   { printf '%s✓%s  %s\n' "$G" "$R" "$*"; }
+warn() { printf '%s!!%s  %s\n' "$Y" "$R" "$*" >&2; }
+die()  { printf '%sxx%s  %s\n' "$E" "$R" "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
 
-# ---------------- environment ----------------
+# questions are read from the terminal, so they also work under `curl … | bash`
+TTY=0; if { : </dev/tty; } 2>/dev/null; then TTY=1; fi
+ask() {  # ask "Question" default  -> prints answer
+  local q="$1" def="${2:-}" a=""
+  if [ "$TTY" -eq 0 ] || [ "$YES" -eq 1 ]; then printf '%s' "$def"; return; fi
+  if [ -n "$def" ]; then printf '%s %s[%s]%s: ' "$q" "$D" "$def" "$R" >/dev/tty; else printf '%s: ' "$q" >/dev/tty; fi
+  IFS= read -r a </dev/tty || true
+  printf '%s' "${a:-$def}"
+}
+ask_secret() {  # like ask, but the typing is hidden
+  local q="$1" def="${2:-}" a=""
+  if [ "$TTY" -eq 0 ] || [ "$YES" -eq 1 ]; then printf '%s' "$def"; return; fi
+  printf '%s: ' "$q" >/dev/tty
+  IFS= read -rs a </dev/tty || true
+  echo >/dev/tty
+  printf '%s' "${a:-$def}"
+}
+confirm() {  # confirm "Question" [y|n default]
+  local def="${2:-n}" a
+  [ "$YES" -eq 1 ] && return 0
+  [ "$TTY" -eq 0 ] && [ "$def" = "y" ] && return 0
+  [ "$TTY" -eq 0 ] && return 1
+  a="$(ask "$1 (y/n)" "$def")"
+  case "$a" in y|Y|yes|YES|Yes) return 0 ;; *) return 1 ;; esac
+}
+pause() { [ "$TTY" -eq 1 ] && [ "$YES" -eq 0 ] && { printf '\n%sPress Enter to go back…%s' "$D" "$R" >/dev/tty; read -r _ </dev/tty || true; }; return 0; }
+
 OS="$(uname -s)"
-SUDO=""; [ "$(id -u)" != 0 ] && command -v sudo >/dev/null 2>&1 && SUDO="sudo"
-DOCKER="docker"; DC=""
+SUDO=""
+if [ "$(id -u)" -ne 0 ] && have sudo; then SUDO="sudo"; fi
 
-detect_docker() {
-  command -v docker >/dev/null 2>&1 || return 1
-  if ! docker info >/dev/null 2>&1; then
-    if [ -n "$SUDO" ] && $SUDO docker info >/dev/null 2>&1; then DOCKER="$SUDO docker"; else return 2; fi
-  fi
-  if $DOCKER compose version >/dev/null 2>&1; then DC="$DOCKER compose"
-  elif command -v docker-compose >/dev/null 2>&1; then DC="${SUDO:+$SUDO }docker-compose"
-  else return 3; fi
-  return 0
-}
+# ---------------------------------------------------------------- install dir
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+DEFAULT_DIR="/opt/ai2vpn"
+if [ "$OS" = "Darwin" ] || { [ "$(id -u)" -ne 0 ] && [ -z "$SUDO" ]; }; then
+  DEFAULT_DIR="$HOME/ai2vpn"   # Docker Desktop shares your home folder by default
+fi
+# where the installer remembers the install folder (so a custom folder is found next time)
+if [ "$(id -u)" -eq 0 ] || [ -n "$SUDO" ]; then CONF_FILE="/etc/ai2vpn.conf"; else CONF_FILE="$HOME/.config/ai2vpn.conf"; fi
+has_files() { [ -f "$INSTALL_DIR/docker-compose.yml" ]; }
+installed() { has_files && [ -f "$INSTALL_DIR/.env" ]; }   # .env is written by the first install
 
-ensure_docker() {
-  detect_docker; local rc=$?
-  [ $rc = 0 ] && { ok "Docker: $($DOCKER --version 2>/dev/null | head -1)"; return 0; }
-  case $rc in
-    1)
-      warn "Docker is not installed / 未安裝 Docker"
-      if [ "$OS" = Linux ] && yesno "Install Docker now with the official script (get.docker.com)? / 用官方腳本安裝 Docker？" y; then
-        curl -fsSL https://get.docker.com | $SUDO sh || { err "Docker installation failed"; return 1; }
-        $SUDO systemctl enable --now docker >/dev/null 2>&1 || true
-        detect_docker || { err "Docker installed but not usable yet — log out/in or run with sudo"; return 1; }
-        ok "Docker installed"
-      else
-        say "Install Docker Desktop: https://docs.docker.com/get-docker/  then run this installer again."
-        return 1
-      fi ;;
-    2) err "Docker is installed but not running, or you lack permission. Start Docker, or run with sudo."; return 1 ;;
-    3) err "Docker Compose v2 is missing. Install the 'docker-compose-plugin' package (or Docker Desktop)."; return 1 ;;
+# ---------------------------------------------------------------- docker
+install_docker() {
+  case "$OS" in
+    Linux)
+      confirm "Docker is not installed. Install it now (from get.docker.com)?" y || die "Docker is needed. Install it and run this again."
+      info "Installing Docker…"
+      have curl || { $SUDO apt-get update -y && $SUDO apt-get install -y curl; } || die "Please install curl first."
+      curl -fsSL https://get.docker.com | $SUDO sh
+      $SUDO systemctl enable --now docker 2>/dev/null || true
+      ;;
+    Darwin) die "Docker is not installed. Install Docker Desktop from https://www.docker.com/products/docker-desktop/ , start it, then run this again." ;;
+    *) die "Unsupported system: $OS. Install Docker with Compose, then run: docker compose up -d --build" ;;
   esac
 }
 
-# ---------------- install folder ----------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
-find_dir() {
-  if [ -n "${A2V_DIR:-}" ]; then DIR="$A2V_DIR"
-  elif [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/docker-compose.yml" ] && [ -f "$SCRIPT_DIR/Dockerfile" ]; then DIR="$SCRIPT_DIR"
-  elif [ -f "./docker-compose.yml" ] && [ -f "./Dockerfile" ] && [ -d ./src ]; then DIR="$(pwd)"
-  else DIR="$HOME/ai2vpn"; fi
+DOCKER=""; COMPOSE=""
+need_docker() {
+  [ -n "$COMPOSE" ] && return 0
+  have docker || install_docker
+  DOCKER="docker"
+  if ! docker info >/dev/null 2>&1; then
+    if [ -n "$SUDO" ] && $SUDO docker info >/dev/null 2>&1; then DOCKER="$SUDO docker"
+    elif [ "$OS" = "Darwin" ]; then die "Docker is installed but not running. Start Docker Desktop and try again."
+    else
+      $SUDO systemctl start docker 2>/dev/null || true; sleep 2
+      if docker info >/dev/null 2>&1; then DOCKER="docker"
+      elif [ -n "$SUDO" ] && $SUDO docker info >/dev/null 2>&1; then DOCKER="$SUDO docker"
+      else die "Docker is installed but not reachable. Start the Docker service and try again."; fi
+    fi
+  fi
+  if $DOCKER compose version >/dev/null 2>&1; then COMPOSE="$DOCKER compose"
+  elif have docker-compose; then COMPOSE="${SUDO:+$SUDO }docker-compose"
+  else
+    if [ "$OS" = "Linux" ]; then
+      info "Installing the Docker Compose plugin…"
+      ($SUDO apt-get install -y docker-compose-plugin || $SUDO dnf install -y docker-compose-plugin || $SUDO yum install -y docker-compose-plugin) >/dev/null 2>&1 || true
+    fi
+    $DOCKER compose version >/dev/null 2>&1 || die "Docker Compose is missing. Install the docker-compose-plugin package and try again."
+    COMPOSE="$DOCKER compose"
+  fi
 }
-installed() { [ -f "$DIR/docker-compose.yml" ] && [ -f "$DIR/.env" ]; }
-dc() { (cd "$DIR" && $DC "$@"); }
+need_install() { installed || die "ai2vpn is not installed in $INSTALL_DIR yet. Choose Install first (or use --dir)."; cd "$INSTALL_DIR"; need_docker; }
 
-# ---------------- .env ----------------
-env_get() { # env_get KEY → value or empty
-  [ -f "$DIR/.env" ] || return 0
-  sed -n "s/^$1=//p" "$DIR/.env" | tail -1 | sed -e "s/^'\(.*\)'$/\1/" -e 's/^"\(.*\)"$/\1/'
+# find docker without installing, starting or asking for a password (for the menu header)
+quick_docker() {
+  [ -n "$COMPOSE" ] && return 0
+  local d=""
+  if have docker && docker info >/dev/null 2>&1; then d="docker"
+  elif have docker && [ -n "$SUDO" ] && sudo -n docker info >/dev/null 2>&1; then d="sudo docker"
+  else return 1; fi
+  if $d compose version >/dev/null 2>&1; then DOCKER="$d"; COMPOSE="$d compose"
+  elif have docker-compose; then DOCKER="$d"; if [ "$d" = "docker" ]; then COMPOSE="docker-compose"; else COMPOSE="sudo docker-compose"; fi
+  else return 1; fi
 }
-env_set() { # env_set KEY VALUE  (single-quoted so special characters are kept literally)
-  local k="$1" v="$2" f="$DIR/.env"
-  touch "$f"; chmod 600 "$f" 2>/dev/null || true
-  local tmp; tmp="$(mktemp)"
-  grep -v "^$k=" "$f" >"$tmp" || true
-  printf "%s='%s'\n" "$k" "$v" >>"$tmp"
-  cat "$tmp" >"$f"; rm -f "$tmp"
+
+# ---------------------------------------------------------------- .env
+env_get() {  # env_get KEY -> value ('' if missing); quotes are removed
+  [ -f "$INSTALL_DIR/.env" ] || return 0
+  $SUDO sed -n "s/^$1=//p" "$INSTALL_DIR/.env" 2>/dev/null | tail -1 | sed -e "s/^'\(.*\)'\$/\1/" -e 's/^"\(.*\)"$/\1/'
 }
-env_unset() { [ -f "$DIR/.env" ] || return 0; local tmp; tmp="$(mktemp)"; grep -v "^$1=" "$DIR/.env" >"$tmp" || true; cat "$tmp" >"$DIR/.env"; rm -f "$tmp"; }
-
-rand_pw() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 16; }
-
-port_in_use() {
-  local p="$1"
-  if command -v ss >/dev/null 2>&1; then ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]$p\$" && return 0; return 1; fi
-  if command -v lsof >/dev/null 2>&1; then lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1 && return 0; return 1; fi
-  if command -v nc >/dev/null 2>&1; then nc -z 127.0.0.1 "$p" >/dev/null 2>&1 && return 0; fi
-  return 1
+env_set() {  # env_set KEY VALUE   (single-quoted, so special characters stay as typed)
+  local f="$INSTALL_DIR/.env" tmp; tmp="$(mktemp)"
+  if [ -f "$f" ]; then $SUDO cat "$f" | grep -v "^$1=" >"$tmp" || true; fi
+  printf "%s='%s'\n" "$1" "$2" >>"$tmp"
+  $SUDO cp "$tmp" "$f"; $SUDO chmod 600 "$f" 2>/dev/null || true; rm -f "$tmp"
 }
-free_port() { local p="${1:-8080}"; while port_in_use "$p"; do p=$((p + 1)); done; echo "$p"; }
+env_unset() {
+  local f="$INSTALL_DIR/.env" tmp; [ -f "$f" ] || return 0; tmp="$(mktemp)"
+  $SUDO cat "$f" | grep -v "^$1=" >"$tmp" || true
+  $SUDO cp "$tmp" "$f"; rm -f "$tmp"
+}
 
-lan_ip() {
+# ---------------------------------------------------------------- small helpers
+port_busy() {
+  local out=""
+  if have ss; then out="$(ss -ltn 2>/dev/null || true)"
+  elif have lsof; then out="$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null || true)"
+  elif have netstat; then out="$(netstat -an 2>/dev/null | grep LISTEN || true)"
+  fi
+  grep -Eq "[:.]$1([[:space:]]|\$)" <<<"$out"
+}
+free_port() { local p="${1:-8080}"; while port_busy "$p"; do p=$((p + 1)); done; echo "$p"; }
+valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+compose_file() { local f; f="$(env_get COMPOSE_FILE)"; echo "$INSTALL_DIR/${f:-docker-compose.yml}"; }
+fixed_port() {  # a port typed straight into docker-compose.yml (instead of ${AI2VPN_PORT})
+  sed -n 's/^[[:space:]]*-[[:space:]]*"\{0,1\}\([0-9][0-9]*\):8080"\{0,1\}[[:space:]]*\(#.*\)\{0,1\}$/\1/p' "$(compose_file)" 2>/dev/null | head -1
+}
+current_port() { local p; p="$(fixed_port)"; [ -z "$p" ] && p="$(env_get AI2VPN_PORT)"; echo "${p:-8080}"; }
+server_ip() {
   local ip=""
-  if command -v ip >/dev/null 2>&1; then ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)"; fi
-  [ -z "$ip" ] && command -v hostname >/dev/null 2>&1 && ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  [ -z "$ip" ] && [ "$OS" = Darwin ] && ip="$(ipconfig getifaddr en0 2>/dev/null)"
+  [ "$OS" = "Linux" ] && ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [ -z "$ip" ] && have ipconfig && ip="$(ipconfig getifaddr en0 2>/dev/null || true)"
   echo "${ip:-localhost}"
 }
+address() { local u; u="$(env_get PUBLIC_URL)"; echo "${u:-http://$(server_ip):$(current_port)}"; }
+rand_pw() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 16 || true; }
+vpn_mode() { [ "$(env_get COMPOSE_FILE)" = "docker-compose.gluetun.yml" ] && echo gluetun || echo built-in; }
+sandbox_on() { [ "$(env_get A2V_SANDBOX)" != "0" ]; }
+running_count() { local n; n="$(cd "$INSTALL_DIR" && $COMPOSE ps --services --filter status=running 2>/dev/null | grep -c . || true)"; echo "${n:-0}"; }
+expected_count() { local n=1; sandbox_on && n=$((n + 1)); [ "$(vpn_mode)" = gluetun ] && n=$((n + 1)); echo "$n"; }
 
-vpn_mode()      { [ "$(env_get COMPOSE_FILE)" = "docker-compose.gluetun.yml" ] && echo gluetun || echo builtin; }
-sandbox_on()    { [ "$(env_get A2V_SANDBOX)" != 0 ]; }
-ai_container()  { echo ai2vpn; }
-
-# ---------------- actions ----------------
-compose_up() {
-  local services=""
-  sandbox_on || services="$( [ "$(vpn_mode)" = gluetun ] && echo "gluetun ai2vpn" || echo "ai2vpn" )"
-  if [ -n "$NO_BUILD" ]; then
-    # shellcheck disable=SC2086
-    dc up -d --no-build $services
-  else
-    info "Building and starting containers (first time can take 5-15 minutes) / 建立並啟動容器（第一次可能要 5-15 分鐘）…"
-    # shellcheck disable=SC2086
-    dc up -d --build $services
-  fi
-  local rc=$?
-  if ! sandbox_on; then dc rm -sf sandbox >/dev/null 2>&1 || true; fi
-  return $rc
+# call ai2vpn's own admin API from inside the container (signs in with ADMIN_PASSWORD from .env)
+a2v_api() {  # a2v_api METHOD PATH [JSON-BODY]   -> prints the JSON answer
+  # shellcheck disable=SC2016
+  $DOCKER exec -i ai2vpn node -e '
+    const [m, p, body] = process.argv.slice(1);
+    const base = "http://127.0.0.1:" + (process.env.PORT || 8080), J = { "content-type": "application/json" };
+    (async () => {
+      const r = await fetch(base + "/api/login", { method: "POST", headers: J, body: JSON.stringify({ password: process.env.ADMIN_PASSWORD }) });
+      if (!r.ok) throw new Error("could not sign in to ai2vpn (HTTP " + r.status + ")");
+      const H = { ...J, cookie: r.headers.get("set-cookie").split(";")[0] };
+      const x = await fetch(base + p, { method: m, headers: H, body: m === "GET" ? undefined : (body || "{}") });
+      process.stdout.write(await x.text());
+    })().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exit(1); });
+  ' "$1" "$2" "${3:-}"
+}
+json_field() {  # json_field <json> <js expression on d>
+  $DOCKER exec -i ai2vpn node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const d=JSON.parse(s);const v=('"$2"');console.log(v==null?"":v)}catch(e){console.log("")}})' <<<"$1"
 }
 
-wait_healthy() {
-  info "Waiting for ai2vpn to start / 等待 ai2vpn 啟動…"
+# ---------------------------------------------------------------- finding an existing install
+is_a2v_dir() { [ -f "$1/docker-compose.yml" ] && [ -f "$1/src/server.js" ] && { grep -qs '^name: ai2vpn' "$1/docker-compose.yml" || grep -qs 'container_name: ai2vpn' "$1/docker-compose.yml"; }; }
+find_installs() {  # prints every ai2vpn folder found, best guess first
+  local c=() d f
+  for f in /etc/ai2vpn.conf "$HOME/.config/ai2vpn.conf"; do
+    [ -r "$f" ] && d="$(sed -n 's/^INSTALL_DIR=//p' "$f" | tail -1)" && [ -n "$d" ] && c+=("$d")
+  done
+  # folders Docker started the ai2vpn containers from (works for any custom folder, even manual installs)
+  if quick_docker; then
+    while IFS= read -r d; do [ -n "$d" ] && c+=("$d"); done < <( { $DOCKER ps -a --filter label=com.docker.compose.project=ai2vpn \
+        --format '{{.Label "com.docker.compose.project.working_dir"}}'; $DOCKER ps -a --filter name=ai2vpn \
+        --format '{{.Label "com.docker.compose.project.working_dir"}}'; } 2>/dev/null | sort -u)
+  fi
+  for d in /opt/ai2vpn "$HOME/ai2vpn" /root/ai2vpn /srv/ai2vpn /data/ai2vpn /usr/local/ai2vpn \
+           /home/*/ai2vpn /opt/*/ai2vpn /srv/*/ai2vpn /data/*/ai2vpn /mnt/*/ai2vpn /mnt/*/*/ai2vpn /media/*/ai2vpn \
+           /volume*/docker/ai2vpn /volume*/*/ai2vpn /vol*/*/ai2vpn /vol*/*/[Dd]ocker/ai2vpn /share/*/ai2vpn /share/[Dd]ocker/ai2vpn \
+           /home/*/docker/ai2vpn /root/docker/ai2vpn /opt/docker/ai2vpn "$PWD" "$PWD/ai2vpn"; do
+    [ -d "$d" ] && c+=("$d")
+  done
+  local seen="" out="" rest=""
+  for d in ${c[@]+"${c[@]}"}; do
+    d="$(cd "$d" 2>/dev/null && pwd -P)" || continue
+    case " $seen " in *" $d "*) continue ;; esac
+    seen="$seen $d"
+    is_a2v_dir "$d" || continue
+    # real installs (they have a .env) first; plain downloads of the code after them
+    if [ -f "$d/.env" ]; then out="$out$d"$'\n'; else rest="$rest$d"$'\n'; fi
+  done
+  if [ "${1:-}" = "--all" ]; then printf '%s%s' "$out" "$rest"; else printf '%s' "$out"; fi
+}
+search_disk() {  # slow: look everywhere for an ai2vpn docker-compose.yml
+  local t=""; have timeout && t="timeout 180"
+  info "Searching the disk (up to 3 minutes)…" >/dev/tty
+  $SUDO $t find / -maxdepth 9 \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -path /var/lib/docker -o -path /snap -o -path '*/node_modules' -o -path '*/.git' -o -path '*/profiles' \) -prune \
+    -o -name docker-compose.yml -print 2>/dev/null | while IFS= read -r f; do d="$(dirname "$f")"; is_a2v_dir "$d" && echo "$d"; done \
+    | awk '{ if (system("[ -f \"" $0 "/.env\" ]") == 0) print; else rest = rest $0 "\n" } END { printf "%s", rest }' || true
+}
+remember_dir() {
+  { [ -n "$SUDO" ] || [ "$(id -u)" -eq 0 ]; } || mkdir -p "$(dirname "$CONF_FILE")"
+  printf '# written by the ai2vpn installer\nINSTALL_DIR=%s\n' "$INSTALL_DIR" | $SUDO tee "$CONF_FILE" >/dev/null 2>&1 || true
+}
+pick_dir() {  # pick_dir "<newline list>"  → sets INSTALL_DIR; returns 1 if cancelled
+  local list="$1" n=0 d a
+  echo >/dev/tty; printf '  %sai2vpn found in:%s\n' "$B" "$R" >/dev/tty
+  while IFS= read -r d; do [ -z "$d" ] && continue; n=$((n + 1)); printf '  %s%d)%s %s%s\n' "$C$B" "$n" "$R" "$d" "$( [ -f "$d/.env" ] || printf ' %s(downloaded, not installed)%s' "$D" "$R")" >/dev/tty; done <<<"$list"
+  [ "$n" -eq 0 ] && printf '  %s(none in the usual places)%s\n' "$D" "$R" >/dev/tty
+  printf '  %sS)%s Search the whole disk\n  %sT)%s Type a folder\n  %s0)%s Cancel\n' "$C$B" "$R" "$C$B" "$R" "$C$B" "$R" >/dev/tty
+  a="$(ask "  Choose" "$( [ "$n" -gt 0 ] && echo 1 || echo S)")"
+  case "$a" in
+    [sS]) local more; more="$(search_disk)"
+          [ -z "$more" ] && { warn "No ai2vpn folder found on this disk."; return 1; }
+          pick_dir "$more"; return $? ;;
+    [tT]) a="$(ask "  Folder" "")"; [ -z "$a" ] && return 1
+          is_a2v_dir "$a" || { warn "No ai2vpn in $a (no docker-compose.yml)."; confirm "Use it anyway (e.g. to install there)?" n || return 1; }
+          INSTALL_DIR="$(cd "$a" 2>/dev/null && pwd -P || echo "$a")"; return 0 ;;
+    *) [[ "$a" =~ ^[0-9]+$ ]] && [ "$a" -ge 1 ] && [ "$a" -le "$n" ] || return 1
+       INSTALL_DIR="$(grep . <<<"$list" | sed -n "${a}p")"; return 0 ;;
+  esac
+}
+resolve_dir() {
+  [ -n "$INSTALL_DIR" ] && return 0                                   # --dir or INSTALL_DIR=…
+  if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/docker-compose.yml" ] && [ -f "$SCRIPT_DIR/src/server.js" ]; then INSTALL_DIR="$SCRIPT_DIR"; return 0; fi
+  local found n; found="$(find_installs)"; n="$(grep -c . <<<"$found" || true)"
+  if [ "${n:-0}" -eq 0 ]; then INSTALL_DIR="$DEFAULT_DIR"; return 0; fi
+  if [ "$n" -eq 1 ] || [ "$TTY" -eq 0 ] || [ "$YES" -eq 1 ]; then
+    INSTALL_DIR="$(head -1 <<<"$found")"; [ "$n" -gt 1 ] && warn "Several installs found; using $INSTALL_DIR (choose another with --dir)."
+    return 0
+  fi
+  pick_dir "$found" || INSTALL_DIR="$(head -1 <<<"$found")"
+}
+page_folder() {
+  header; title "3 · Settings › Install folder"
+  printf '  Now using: %s%s%s\n' "$B" "$INSTALL_DIR" "$R"
+  local found; found="$(find_installs --all)"
+  if pick_dir "$found"; then
+    COMPOSE=""; quick_docker || true
+    remember_dir
+    [ -f "$INSTALL_DIR/install.sh" ] && install_shortcut >/dev/null
+    ok "Now using $INSTALL_DIR"
+  else info "Unchanged."; fi
+  pause
+}
+
+# ---------------------------------------------------------------- actions
+# git with the GitHub token (if any) passed as a header, so it is never saved in .git/config
+g() {
+  if [ -n "${GH_TOKEN:-}" ]; then
+    $SUDO git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')" "$@"
+  else $SUDO git "$@"; fi
+}
+git_update() {  # pull the latest code, keeping local edits (e.g. a changed docker-compose.yml)
+  local dir="$1" stashed=0
+  if [ -n "$($SUDO git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    $SUDO git -C "$dir" stash push -q -m "ai2vpn installer $(date +%F)" && stashed=1 && info "Your own changes to the files were set aside and will be put back."
+  fi
+  if ! g -C "$dir" pull -q --ff-only ${BRANCH:+origin "$BRANCH"}; then
+    if [ "$stashed" -eq 1 ]; then $SUDO git -C "$dir" stash pop -q || true; fi
+    die "Could not download the update. If the repository is private, set GH_TOKEN first."
+  fi
+  if [ "$stashed" -eq 1 ] && ! $SUDO git -C "$dir" stash pop -q; then
+    warn "Your own changes clash with the update; the update was kept and your changes are saved in 'git stash list'."
+    $SUDO git -C "$dir" checkout -q -- . 2>/dev/null || true
+  fi
+}
+fetch_code() {
+  if [ -n "$SCRIPT_DIR" ] && [ "$INSTALL_DIR" = "$SCRIPT_DIR" ] && has_files; then
+    if [ -d "$INSTALL_DIR/.git" ] && confirm "Download the latest version from GitHub into this folder?" y; then
+      git_update "$INSTALL_DIR"
+    else info "Using the files in $INSTALL_DIR"; fi
+    return
+  fi
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    info "Downloading the latest version…"
+    git_update "$INSTALL_DIR"
+    return
+  fi
+  if has_files; then info "Using the files in $INSTALL_DIR (not a git folder, so not updated)"; return; fi
+  $SUDO mkdir -p "$INSTALL_DIR"
+  if have git; then
+    info "Downloading ai2vpn to $INSTALL_DIR…"
+    local tmp; tmp="$(mktemp -d)"
+    SUDO="" g clone -q ${BRANCH:+--branch "$BRANCH"} "$REPO_URL.git" "$tmp/src" \
+      || { rm -rf "$tmp"; die "Could not download ai2vpn. If the repository is private, set GH_TOKEN first."; }
+    $SUDO cp -a "$tmp/src/." "$INSTALL_DIR/"
+    rm -rf "$tmp"
+  else
+    info "Downloading ai2vpn to $INSTALL_DIR…"
+    curl -fsSL ${GH_TOKEN:+-H "Authorization: Bearer $GH_TOKEN"} "$REPO_API/tarball/$BRANCH" | $SUDO tar -xz -C "$INSTALL_DIR" --strip-components=1 \
+      || die "Could not download ai2vpn. If the repository is private, set GH_TOKEN first."
+  fi
+}
+
+install_shortcut() {
+  local bin=/usr/local/bin/ai2vpn
+  [ -d /usr/local/bin ] || $SUDO mkdir -p /usr/local/bin 2>/dev/null || return 0
+  printf '#!/bin/sh\n# opens the ai2vpn menu\nexec bash "%s/install.sh" --dir "%s" "$@"\n' "$INSTALL_DIR" "$INSTALL_DIR" | $SUDO tee "$bin" >/dev/null 2>&1 \
+    && $SUDO chmod +x "$bin" 2>/dev/null && ok "Shortcut added: type ${B}ai2vpn${R} to open this menu again." || true
+}
+
+compose_up() {  # start what's enabled (the sandbox can be switched off)
+  local svc=() build=(--build)
+  [ -n "${A2V_NO_BUILD:-}" ] && build=(--no-build)
+  if ! sandbox_on; then svc=(ai2vpn); [ "$(vpn_mode)" = gluetun ] && svc=(gluetun ai2vpn); fi
+  $COMPOSE up -d "${build[@]}" --remove-orphans ${svc[@]+"${svc[@]}"}
+  if ! sandbox_on; then $COMPOSE rm -sf sandbox >/dev/null 2>&1 || true; fi
+}
+
+wait_for_app() {
+  info "Waiting for ai2vpn to start…"
   local i s
   for i in $(seq 1 90); do
     s="$($DOCKER inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' ai2vpn 2>/dev/null || echo missing)"
-    [ "$s" = healthy ] && { ok "ai2vpn is running / 已啟動"; return 0; }
-    [ "$s" = exited ] || [ "$s" = dead ] && break
+    case "$s" in healthy) APP_OK=1; return 0 ;; exited|dead) break ;; esac
     sleep 2
   done
-  err "ai2vpn did not become healthy. Last log lines:"
-  $DOCKER logs --tail 30 ai2vpn 2>&1 | sed 's/^/    /'
-  return 1
+  APP_OK=0
+  warn "ai2vpn did not report healthy yet. Last log lines:"
+  $DOCKER logs --tail 20 ai2vpn 2>&1 | sed 's/^/     /' >&2 || true
 }
 
-show_access() {
-  local port pw url
-  port="$(env_get AI2VPN_PORT)"; port="${port:-8080}"
-  pw="$(env_get ADMIN_PASSWORD)"
-  url="$(env_get PUBLIC_URL)"; [ -z "$url" ] && url="http://$(lan_ip):$port"
-  line
-  say "${B}ai2vpn is ready / ai2vpn 已就緒${N}"
-  say "  Web UI   : ${G}${url}${N}"
-  say "  API base : ${url}/v1"
-  say "  Password : ${B}${pw:-<see docker logs ai2vpn>}${N}"
-  sandbox_on && say "  Sandbox  : Web UI → Sandbox tab (Claude Code / Codex / Gemini CLI)"
-  say ""
-  say "Next / 下一步:"
-  if [ "$(vpn_mode)" = builtin ]; then say "  1. VPN tab → paste your WireGuard/OpenVPN config → Save & connect (if not done yet)"; fi
-  say "  2. Accounts → + Add account → Sign in"
-  say "  3. Copy the account's Base URL + API key into your app"
-  line
+summary() {
+  local pw; pw="$(env_get ADMIN_PASSWORD)"
+  echo
+  printf '%s┌──────────────────────────────────────────────────────────%s\n' "$G" "$R"
+  printf '%s│%s  %sai2vpn is ready%s\n' "$G" "$R" "$B" "$R"
+  printf '%s│%s  Open:        %s%s%s\n' "$G" "$R" "$B" "$(address)" "$R"
+  printf '%s│%s  Password:    %s%s%s\n' "$G" "$R" "$B$Y" "${pw:-(see: docker logs ai2vpn)}" "$R"
+  printf '%s│%s  API base:    %s/v1\n' "$G" "$R" "$(address)"
+  if sandbox_on; then printf '%s│%s  Sandbox:     web UI → Sandbox (Claude Code, Codex, Gemini CLI)\n' "$G" "$R"; fi
+  printf '%s│%s  VPN:         %s\n' "$G" "$R" "$( [ "$(vpn_mode)" = gluetun ] && echo "gluetun ($(env_get VPN_SERVICE_PROVIDER))" || echo "web UI → VPN tab, or menu 3 → 4")"
+  printf '%s│%s  Folder:      %s\n' "$G" "$R" "$INSTALL_DIR"
+  printf '%s└──────────────────────────────────────────────────────────%s\n' "$G" "$R"
 }
 
-configure_vpn_now() { # load a WireGuard/OpenVPN file into the built-in VPN through the API
-  choose "Load a VPN config now? / 而家載入 VPN 設定？" \
-    "WireGuard .conf file / WireGuard 檔案" \
-    "OpenVPN .ovpn file + username/password / OpenVPN 檔案 + 帳號密碼" \
-    "Later, in the web UI / 稍後喺網頁設定"
-  local mode
-  case "$CHOICE" in 1) mode=wireguard ;; 2) mode=openvpn ;; *) return 0 ;; esac
-  ask "Path to the file / 檔案路徑" ""
-  local file="${REPLY/#\~/$HOME}"
-  [ -f "$file" ] || { err "File not found: $file"; return 1; }
-  local user="" pass="" ks=false
-  if [ "$mode" = openvpn ]; then
-    ask "VPN service username / 服務帳號" ""; user="$REPLY"
-    ask_secret "VPN service password / 服務密碼" "" "none"; pass="$REPLY"
+first_setup() {  # questions asked only on the very first install (later: Settings menu)
+  local p="$PORT" pw v
+  if [ -z "$p" ]; then
+    p="$(free_port 8080)"
+    [ "$p" != 8080 ] && info "Port 8080 is in use; suggesting $p."
+    p="$(ask "Port for the web UI and API" "$p")"
   fi
-  yesno "Enable the kill switch (block traffic if the VPN drops)? / 開啟 kill switch？" y && ks=true
-  info "Connecting the VPN / 連接 VPN…"
-  # shellcheck disable=SC2016
-  $DOCKER exec -i -e MODE="$mode" -e VUSER="$user" -e VPASS="$pass" -e KS="$ks" ai2vpn node -e '
-    const conf = require("fs").readFileSync(0, "utf8");
-    const base = "http://127.0.0.1:" + (process.env.PORT || 8080);
-    const J = { "content-type": "application/json" };
-    (async () => {
-      const r = await fetch(base + "/api/login", { method: "POST", headers: J, body: JSON.stringify({ password: process.env.ADMIN_PASSWORD }) });
-      if (!r.ok) throw new Error("login failed (" + r.status + ")");
-      const cookie = r.headers.get("set-cookie").split(";")[0];
-      const H = { ...J, cookie };
-      const body = { mode: process.env.MODE, killSwitch: process.env.KS === "true", autoConnect: true };
-      if (process.env.MODE === "wireguard") body.wireguardConfig = conf;
-      else Object.assign(body, { openvpnConfig: conf, openvpnUser: process.env.VUSER, openvpnPass: process.env.VPASS });
-      await fetch(base + "/api/vpn", { method: "PUT", headers: H, body: JSON.stringify(body) });
-      const c = await (await fetch(base + "/api/vpn/connect", { method: "POST", headers: H, body: "{}" })).json();
-      const s = c.status || {};
-      console.log(s.status === "connected" ? "connected " + ((s.ip && s.ip.ip) || "") + " " + ((s.ip && s.ip.country) || "") : "not connected: " + (c.error || s.error || s.status));
-    })().catch((e) => { console.log("error: " + e.message); process.exit(1); });
-  ' <"$file"
-}
-
-ask_gluetun() {
-  say ""
-  say "${B}gluetun${N} handles the VPN by provider name. See https://github.com/qdm12/gluetun-wiki for your provider's settings."
-  ask "VPN provider (surfshark, nordvpn, mullvad, protonvpn, private internet access, expressvpn, …)" "$(env_get VPN_SERVICE_PROVIDER || true)"
-  env_set VPN_SERVICE_PROVIDER "${REPLY:-surfshark}"
-  choose "VPN type" "WireGuard" "OpenVPN"
-  if [ "$CHOICE" = 2 ]; then
-    env_set VPN_TYPE openvpn
-    ask "OpenVPN service username / 服務帳號" "$(env_get OPENVPN_USER)"; env_set OPENVPN_USER "$REPLY"
-    ask_secret "OpenVPN service password / 服務密碼" "$(env_get OPENVPN_PASSWORD)"; env_set OPENVPN_PASSWORD "$REPLY"
+  valid_port "$p" || die "Not a valid port: $p"
+  port_busy "$p" && die "Port $p is already in use. Pick another one."
+  pw="$(rand_pw)"
+  v="$(ask_secret "Admin password for the web UI (Enter = generate one)" "$pw")"
+  [ ${#v} -ge 6 ] || die "The password needs at least 6 characters."
+  case "$v" in *"'"*) die "Please don't use the ' character in the password." ;; esac
+  env_set AI2VPN_PORT "$p"; env_set ADMIN_PASSWORD "$v"
+  env_set TZ "$( (cat /etc/timezone 2>/dev/null || timedatectl show -p Timezone --value 2>/dev/null || echo UTC) | head -1)"
+  ok "Port $p and admin password saved in .env"
+  if [ "$TTY" -eq 1 ] && [ "$YES" -eq 0 ]; then
+    echo
+    printf '  %sVPN%s — how should ai2vpn reach the internet?\n' "$B" "$R"
+    item 1 "Built-in VPN: paste a WireGuard / OpenVPN config (Surfshark, NordVPN, Mullvad, …)  ${D}recommended${R}"
+    item 2 "gluetun: choose the VPN provider by name"
+    item 3 "No VPN for now (add it later)"
+    case "$(ask "  Choose" 1)" in
+      2) env_set COMPOSE_FILE docker-compose.gluetun.yml; ask_gluetun ;;
+      3) ;;
+      *) FIRST_VPN_FILE=1 ;;
+    esac
+    if confirm "Also run the sandbox with Claude Code, Codex and Gemini CLI?" y; then env_set A2V_SANDBOX 1; else env_set A2V_SANDBOX 0; fi
   else
-    env_set VPN_TYPE wireguard
-    ask_secret "WireGuard private key (PrivateKey in your .conf)" "$(env_get WIREGUARD_PRIVATE_KEY)"; env_set WIREGUARD_PRIVATE_KEY "$REPLY"
-    ask "WireGuard address (Address in your .conf, e.g. 10.14.0.2/16)" "$(env_get WIREGUARD_ADDRESSES)"; env_set WIREGUARD_ADDRESSES "$REPLY"
+    env_set A2V_SANDBOX 1
   fi
-  ask "Server countries, comma separated (optional) / 伺服器國家（可留空）" "$(env_get SERVER_COUNTRIES)"; env_set SERVER_COUNTRIES "$REPLY"
 }
 
 do_install() {
-  say ""; say "${B}ai2vpn setup / 安裝${N}"; line
-  ensure_docker || return 1
-  command -v git >/dev/null 2>&1 || { err "git is required / 需要 git（例如 apt install git）"; return 1; }
-  [ "$OS" = Linux ] && [ ! -e /dev/net/tun ] && warn "/dev/net/tun not found — the built-in OpenVPN needs it (try: sudo modprobe tun)"
+  if [ "${DIR_ASKED:-0}" -eq 0 ] && ! installed && [ "$TTY" -eq 1 ] && [ "$YES" -eq 0 ] && [ -z "$SCRIPT_DIR$PORT" ]; then
+    INSTALL_DIR="$(ask "Install folder" "$INSTALL_DIR")"
+  fi
+  need_docker
+  # resources
+  if [ "$OS" = "Linux" ] && [ -r /proc/meminfo ]; then
+    local mem_mb=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1024 ))
+    [ "$mem_mb" -lt 1900 ] && warn "This machine has ${mem_mb} MB RAM; about 2 GB (4 GB with several accounts) is recommended."
+  fi
+  local parent="$INSTALL_DIR"; while [ ! -d "$parent" ]; do parent="$(dirname "$parent")"; done
+  local free_gb=$(( $(df -Pk "$parent" | awk 'NR==2 {print $4}') / 1024 / 1024 ))
+  [ "$free_gb" -lt 10 ] && warn "Only ${free_gb} GB free disk at $parent; about 10 GB is recommended (images + browser profiles)."
+  if [ "$OS" = "Linux" ] && [ ! -e /dev/net/tun ]; then warn "/dev/net/tun is missing; the built-in OpenVPN needs it (try: sudo modprobe tun)."; fi
 
-  # 1. Folder + code
-  if [ -f "$DIR/docker-compose.yml" ]; then
-    ok "Using $DIR"
+  fetch_code
+  cd "$INSTALL_DIR"
+  if [ ! -f .env ]; then
+    first_setup
+  elif [ -n "$PORT" ]; then
+    valid_port "$PORT" || die "Not a valid port: $PORT"
+    env_set AI2VPN_PORT "$PORT"; ok "Port changed to $PORT"
   else
-    ask "Install folder / 安裝資料夾" "$DIR"; DIR="${REPLY/#\~/$HOME}"
-    if [ -d "$DIR/.git" ]; then ok "Existing checkout in $DIR"
-    else
-      info "Downloading ai2vpn / 下載 ai2vpn…"
-      git clone ${A2V_BRANCH:+--branch "$A2V_BRANCH"} "$A2V_REPO" "$DIR" || { err "git clone failed"; return 1; }
-    fi
+    info "Keeping your settings (port $(current_port), VPN: $(vpn_mode), sandbox: $(sandbox_on && echo on || echo off))"
   fi
-  [ -f "$DIR/.env" ] && cp "$DIR/.env" "$DIR/.env.bak.$(date +%Y%m%d%H%M%S)" && info "Backed up existing .env"
-
-  # 2. Password
-  local cur_pw; cur_pw="$(env_get ADMIN_PASSWORD)"
-  local def_pw="${cur_pw:-$(rand_pw)}"
-  while :; do
-    ask_secret "Web UI admin password / 管理員密碼" "$def_pw" "$( [ -n "$cur_pw" ] && echo keep || echo "generate $def_pw" )"
-    case "$REPLY" in *"'"*) warn "Please don't use the ' character" ;; ?????*) break ;; *) warn "At least 6 characters / 至少 6 個字元" ;; esac
-  done
-  env_set ADMIN_PASSWORD "$REPLY"
-
-  # 3. Port
-  local cur_port; cur_port="$(env_get AI2VPN_PORT)"
-  local sug; sug="${cur_port:-$(free_port 8080)}"
-  [ -z "$cur_port" ] && [ "$sug" != 8080 ] && warn "Port 8080 is in use — suggesting $sug / 8080 已被佔用，建議用 $sug"
-  while :; do
-    ask "Port for the web UI and API / 網頁及 API 端口" "$sug"
-    case "$REPLY" in ''|*[!0-9]*) warn "Number please"; continue ;; esac
-    if [ "$REPLY" != "$cur_port" ] && port_in_use "$REPLY"; then warn "Port $REPLY is in use / 已被佔用"; continue; fi
-    break
-  done
-  env_set AI2VPN_PORT "$REPLY"
-
-  # 4. Public URL + timezone
-  ask "Public URL if behind a domain/reverse proxy (optional) / 公開網址（可留空）" "$(env_get PUBLIC_URL)"; env_set PUBLIC_URL "$REPLY"
-  local tz="${TZ:-}"; [ -z "$tz" ] && [ -f /etc/timezone ] && tz="$(cat /etc/timezone)"
-  [ -z "$tz" ] && command -v timedatectl >/dev/null 2>&1 && tz="$(timedatectl show -p Timezone --value 2>/dev/null)"
-  ask "Time zone / 時區" "$(env_get TZ | grep . || echo "${tz:-UTC}")"; env_set TZ "$REPLY"
-
-  # 5. VPN mode
-  choose "How should ai2vpn connect to the VPN? / VPN 連線方式" \
-    "Built-in: paste a WireGuard/OpenVPN config (Surfshark, NordVPN, Mullvad, …) — recommended / 內置（建議）" \
-    "gluetun: pick the provider by name, settings stored in .env / 用 gluetun" \
-    "No VPN for now (can be added later in the web UI) / 暫時唔用 VPN"
-  case "$CHOICE" in
-    2) env_set COMPOSE_FILE docker-compose.gluetun.yml; ask_gluetun ;;
-    *) env_unset COMPOSE_FILE; local want_vpn=$CHOICE ;;
-  esac
-
-  # 6. Sandbox
-  if yesno "Also run the sandbox with Claude Code / Codex / Gemini CLI? / 一齊安裝 Sandbox（Claude Code / Codex）？" y; then env_set A2V_SANDBOX 1; else env_set A2V_SANDBOX 0; fi
-  mkdir -p "$DIR/data" "$DIR/workspace" "$DIR/sandbox-home"
-
-  # 7. Start
-  line
-  compose_up || { err "Starting the containers failed — see the messages above."; return 1; }
-  wait_healthy || return 1
-  if [ "$(vpn_mode)" = builtin ] && [ "${want_vpn:-3}" = 1 ]; then configure_vpn_now || warn "You can set up the VPN in the web UI → VPN tab"; fi
-  show_access
+  $SUDO mkdir -p data workspace sandbox-home
+  info "Building and starting (the first time downloads ~2 GB and takes 5–15 minutes)…"
+  compose_up
+  wait_for_app
+  remember_dir
+  install_shortcut
+  if [ "${FIRST_VPN_FILE:-0}" -eq 1 ] && [ "${APP_OK:-0}" -eq 1 ] && confirm "Load your WireGuard / OpenVPN file now?" y; then
+    do_vpn_file || warn "You can do it later: web UI → VPN, or menu 3 → 4."
+  fi
+  summary
 }
 
-do_update() {
-  installed || { err "Not installed yet — choose Install first / 未安裝"; return 1; }
-  ensure_docker || return 1
-  info "Updating code / 更新程式碼…"
-  local stashed=0
-  if [ -n "$(cd "$DIR" && git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
-    (cd "$DIR" && git stash push -q -m "ai2vpn installer $(date +%F)") && stashed=1 && info "Saved your local changes (git stash)"
-  fi
-  (cd "$DIR" && git pull --ff-only) || { err "git pull failed"; [ $stashed = 1 ] && (cd "$DIR" && git stash pop -q); return 1; }
-  if [ $stashed = 1 ]; then (cd "$DIR" && git stash pop -q) || warn "Your local changes conflict with the update — they are kept in 'git stash list'"; fi
-  compose_up && wait_healthy && ok "Updated / 已更新"
-  if yesno "Remove old, unused Docker images to free disk space? / 刪除舊映像釋放空間？" n; then $DOCKER image prune -f >/dev/null && ok "Cleaned up"; fi
+do_status() {
+  need_install
+  echo; printf '%sContainers%s\n' "$B" "$R"
+  $COMPOSE ps 2>/dev/null || true
+  echo
+  printf 'Address:  %s\n' "$(address)"
+  printf 'Folder:   %s\n' "$INSTALL_DIR"
+  printf 'Data:     %s/data (%s)\n' "$INSTALL_DIR" "$($SUDO du -sh "$INSTALL_DIR/data" 2>/dev/null | awk '{print $1}' || echo '?')"
+  printf 'Sandbox:  %s\n' "$(sandbox_on && echo on || echo off)"
+  if [ -d "$INSTALL_DIR/.git" ]; then printf 'Version:  %s\n' "$($SUDO git -C "$INSTALL_DIR" log -1 --format='%h %cd' --date=short 2>/dev/null || echo '?')"; fi
+  if [ -n "$(fixed_port)" ]; then warn "The port is written directly in docker-compose.yml. Menu 3 → 1 can move it to .env."; fi
+  do_vpn_status || true
+  return 0
 }
-
+do_vpn_status() {
+  need_install
+  local j; j="$(a2v_api GET /api/vpn 2>/dev/null)" || { printf 'VPN:      %s(ai2vpn is not running)%s\n' "$D" "$R"; return 0; }
+  printf 'VPN:      %s · %s\n' "$(json_field "$j" 'd.status.mode+" · "+d.status.status+(d.status.error?" ("+d.status.error+")":"")')" \
+    "exit IP $(json_field "$j" '(d.status.ip&&d.status.ip.ip?d.status.ip.ip+" "+(d.status.ip.country||"")+" "+(d.status.ip.org||""):"unknown")')"
+}
+do_start()   { need_install; info "Starting…"; compose_up; ok "Started. Open $(address)"; }
+do_stop()    { need_install; info "Stopping…"; $COMPOSE stop; ok "Stopped. Your data is kept."; }
+do_restart() { need_install; info "Restarting…"; $COMPOSE restart; ok "Restarted."; }
+do_logs() {
+  need_install
+  local svc="ai2vpn"
+  if [ "$TTY" -eq 1 ] && [ "$YES" -eq 0 ]; then
+    echo "  1) ai2vpn   2) Sandbox   3) gluetun   4) All"
+    case "$(ask "Which logs" 1)" in 2) svc=sandbox ;; 3) svc=gluetun ;; 4) svc="" ;; *) svc=ai2vpn ;; esac
+  fi
+  info "Showing logs. Press Ctrl+C to stop."
+  $COMPOSE logs -f --tail 100 $svc || true
+}
+do_shell() {
+  need_install
+  sandbox_on || die "The sandbox is switched off (menu 3 → 5)."
+  info "Opening the sandbox terminal (tmux). Leave with Ctrl+B then D — it keeps running."
+  $DOCKER exec -it -u coder ai2vpn-sandbox tmux new-session -A -s main -c /workspace || die "The sandbox isn't running. Start it from the menu (2 → 2)."
+}
+do_port() {
+  need_install
+  local p="${1:-}"
+  [ -z "$p" ] && p="$(ask "New port (now $(current_port))" "$(free_port "$(current_port)")")"
+  valid_port "$p" || die "Not a valid port: $p"
+  [ "$p" = "$(current_port)" ] && { info "The port is already $p."; return 0; }
+  port_busy "$p" && die "Port $p is already in use. Pick another one."
+  if [ -n "$(fixed_port)" ]; then
+    info "The port was written directly in docker-compose.yml; moving it to .env so this menu can manage it."
+    $SUDO sed -i.bak -E 's/^([[:space:]]*-[[:space:]]*)"?[0-9]+:8080"?/\1"${AI2VPN_PORT:-8080}:8080"/' "$(compose_file)" && $SUDO rm -f "$(compose_file).bak"
+  fi
+  env_set AI2VPN_PORT "$p"
+  compose_up
+  ok "Port changed. Open $(address)"
+  if [ -n "$(env_get PUBLIC_URL)" ]; then warn "You use a public URL / reverse proxy: point it to port $p too."; fi
+  return 0
+}
+do_password() {
+  need_install
+  local v="${1:-}"
+  [ -z "$v" ] && v="$(ask_secret "New admin password (at least 6 characters)" "")"
+  [ -z "$v" ] && { info "Cancelled."; return 0; }
+  [ ${#v} -ge 6 ] || die "At least 6 characters, please."
+  case "$v" in *"'"*) die "Please don't use the ' character." ;; esac
+  env_set ADMIN_PASSWORD "$v"
+  compose_up >/dev/null 2>&1
+  wait_for_app
+  ok "Password changed. Everyone is signed out of the web UI."
+}
+do_public_url() {
+  need_install
+  local u; u="$(ask "Public URL, e.g. https://ai.example.com (empty = automatic)" "$(env_get PUBLIC_URL)")"
+  env_set PUBLIC_URL "${u%/}"
+  compose_up >/dev/null 2>&1
+  ok "Saved. API base: $(address)/v1"
+}
+ask_gluetun() {
+  echo
+  info "gluetun picks the server by provider name. Settings per provider: https://github.com/qdm12/gluetun-wiki"
+  env_set VPN_SERVICE_PROVIDER "$(ask "VPN provider (surfshark, nordvpn, mullvad, protonvpn, expressvpn, private internet access, …)" "$(env_get VPN_SERVICE_PROVIDER | grep . || echo surfshark)")"
+  printf '  1) WireGuard   2) OpenVPN\n'
+  if [ "$(ask "  VPN type" 1)" = 2 ]; then
+    env_set VPN_TYPE openvpn
+    env_set OPENVPN_USER "$(ask "OpenVPN service username (not your login)" "$(env_get OPENVPN_USER)")"
+    env_set OPENVPN_PASSWORD "$(ask_secret "OpenVPN service password" "$(env_get OPENVPN_PASSWORD)")"
+  else
+    env_set VPN_TYPE wireguard
+    env_set WIREGUARD_PRIVATE_KEY "$(ask_secret "WireGuard private key (PrivateKey in your .conf)" "$(env_get WIREGUARD_PRIVATE_KEY)")"
+    env_set WIREGUARD_ADDRESSES "$(ask "WireGuard address (Address in your .conf, e.g. 10.14.0.2/16)" "$(env_get WIREGUARD_ADDRESSES)")"
+  fi
+  env_set SERVER_COUNTRIES "$(ask "Server countries, comma separated (optional)" "$(env_get SERVER_COUNTRIES)")"
+}
+do_vpn_file() {  # load a WireGuard .conf / OpenVPN .ovpn into the built-in VPN and connect
+  need_install
+  [ "$(vpn_mode)" = built-in ] || die "This is for the built-in VPN; you use gluetun (switch in menu 3 → 4 → 4)."
+  local f mode body u="" pw="" ks j
+  f="$(ask "Path to your WireGuard .conf or OpenVPN .ovpn file" "")"; f="${f/#\~/$HOME}"
+  [ -z "$f" ] && { info "Cancelled."; return 0; }
+  [ -f "$f" ] || die "File not found: $f"
+  if grep -qiE '^[[:space:]]*\[Interface\]' "$f"; then mode=wireguard; else mode=openvpn; fi
+  ks=false; if confirm "Turn on the kill switch (block all traffic if the VPN drops)?" y; then ks=true; fi
+  if [ "$mode" = openvpn ]; then
+    u="$(ask "VPN service username (not your login)" "")"; pw="$(ask_secret "VPN service password" "")"
+  fi
+  body="$($DOCKER exec -i -e MODE="$mode" -e U="$u" -e PW="$pw" -e KS="$ks" ai2vpn node -e '
+    let s=""; process.stdin.on("data",c=>s+=c).on("end",()=>{ const e=process.env;
+      const b={ mode:e.MODE, killSwitch:e.KS==="true", autoConnect:true };
+      if (e.MODE==="wireguard") b.wireguardConfig=s; else Object.assign(b,{ openvpnConfig:s, openvpnUser:e.U, openvpnPass:e.PW });
+      process.stdout.write(JSON.stringify(b)); });' <"$f")"
+  a2v_api PUT /api/vpn "$body" >/dev/null
+  info "Connecting ($mode)…"
+  j="$(a2v_api POST /api/vpn/connect || true)"
+  if [ "$(json_field "$j" 'd.status&&d.status.status')" = connected ]; then
+    ok "VPN connected — exit IP $(json_field "$j" 'd.status.ip?(d.status.ip.ip+" "+(d.status.ip.country||"")):"?"')"
+  else
+    warn "Not connected: $(json_field "$j" 'd.error||(d.status&&d.status.error)||"unknown"')"
+    return 1
+  fi
+}
+do_vpn_mode() {
+  need_install
+  if [ "$(vpn_mode)" = gluetun ]; then
+    confirm "Switch back to the built-in VPN (configured in the web UI)?" y || return 0
+    $COMPOSE down --remove-orphans; env_unset COMPOSE_FILE
+  else
+    confirm "Switch to gluetun (VPN chosen by provider name)?" y || return 0
+    ask_gluetun; $COMPOSE down --remove-orphans; env_set COMPOSE_FILE docker-compose.gluetun.yml
+  fi
+  COMPOSE=""; need_docker; compose_up; wait_for_app; ok "VPN mode: $(vpn_mode)"
+}
+do_sandbox_toggle() {
+  need_install
+  if sandbox_on; then
+    confirm "Switch the sandbox off? (your projects and CLI logins are kept)" y || return 0
+    env_set A2V_SANDBOX 0
+  else env_set A2V_SANDBOX 1; fi
+  compose_up; ok "Sandbox: $(sandbox_on && echo on || echo off)"
+}
 do_backup() {
-  installed || { err "Not installed"; return 1; }
-  local out="$HOME/ai2vpn-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-  info "Backing up .env, data/ and sandbox-home/ (accounts, logins, VPN settings) → $out"
-  (cd "$DIR" && tar -czf "$out" .env data sandbox-home 2>/dev/null) && chmod 600 "$out" && ok "Backup saved: $out" && warn "It contains your logins and passwords — keep it private / 包含登入資料，請妥善保管"
-}
-
-do_manage() {
-  installed || { err "Not installed yet / 未安裝"; return 1; }
-  ensure_docker >/dev/null || return 1
-  while :; do
-    choose "Manage / 管理  (${DIR})" \
-      "Start / 啟動" "Stop / 停止" "Restart / 重啟" "Status / 狀態" \
-      "Logs (Ctrl-C to exit) / 日誌" "Open a shell in the sandbox / 進入 Sandbox" \
-      "Back up data / 備份" "Show web UI address & password / 顯示網址同密碼"
-    case "$CHOICE" in
-      1) compose_up && wait_healthy && show_access ;;
-      2) dc stop && ok "Stopped / 已停止" ;;
-      3) dc restart && wait_healthy ;;
-      4) dc ps; say ""; $DOCKER exec ai2vpn node -e 'fetch("http://127.0.0.1:"+(process.env.PORT||8080)+"/healthz").then(r=>console.log("health:",r.status))' 2>/dev/null || warn "ai2vpn not reachable" ;;
-      5) dc logs -f --tail 100 ai2vpn ;;
-      6) $DOCKER exec -it -u coder ai2vpn-sandbox tmux new-session -A -s main -c /workspace 2>/dev/null || $DOCKER exec -it -u coder ai2vpn-sandbox bash || err "The sandbox isn't running" ;;
-      7) do_backup ;;
-      8) show_access ;;
-      0) return 0 ;;
-    esac
-  done
-}
-
-apply_settings() { info "Applying / 套用設定…"; compose_up && wait_healthy && ok "Done / 完成"; }
-
-do_settings() {
-  installed || { err "Not installed yet / 未安裝"; return 1; }
-  ensure_docker >/dev/null || return 1
-  while :; do
-    local sb; sandbox_on && sb="on / 開" || sb="off / 關"
-    choose "Settings / 設定" \
-      "Admin password / 管理員密碼" \
-      "Port (now $(env_get AI2VPN_PORT | grep . || echo 8080)) / 端口" \
-      "Public URL (now $(env_get PUBLIC_URL | grep . || echo auto)) / 公開網址" \
-      "VPN mode (now $(vpn_mode)) / VPN 模式" \
-      "Sandbox (now $sb)" \
-      "Load a WireGuard/OpenVPN file into the built-in VPN / 載入 VPN 檔案"
-    case "$CHOICE" in
-      1) while :; do ask_secret "New admin password / 新密碼" "" "cancel"; [ -z "$REPLY" ] && break
-           case "$REPLY" in *"'"*) warn "No ' please" ;; ?????*) env_set ADMIN_PASSWORD "$REPLY"; apply_settings; break ;; *) warn "At least 6 characters" ;; esac; done ;;
-      2) ask "New port / 新端口" "$(free_port "$(env_get AI2VPN_PORT | grep . || echo 8080)")"
-         case "$REPLY" in ''|*[!0-9]*) warn "Number please" ;; *) env_set AI2VPN_PORT "$REPLY"; apply_settings ;; esac ;;
-      3) ask "Public URL (empty = auto) / 公開網址（留空 = 自動）" "$(env_get PUBLIC_URL)"; env_set PUBLIC_URL "$REPLY"; apply_settings ;;
-      4) choose "VPN mode / VPN 模式" "Built-in (configure in the web UI) / 內置" "gluetun"
-         case "$CHOICE" in
-           1) [ "$(vpn_mode)" = gluetun ] && dc down; env_unset COMPOSE_FILE; apply_settings ;;
-           2) ask_gluetun; [ "$(vpn_mode)" = builtin ] && dc down; env_set COMPOSE_FILE docker-compose.gluetun.yml; apply_settings ;;
-         esac ;;
-      5) if sandbox_on; then env_set A2V_SANDBOX 0; else env_set A2V_SANDBOX 1; fi; apply_settings ;;
-      6) [ "$(vpn_mode)" = builtin ] && configure_vpn_now || warn "Only for the built-in VPN mode" ;;
-      0) return 0 ;;
-    esac
-  done
-}
-
-do_uninstall() {
-  installed || [ -f "$DIR/docker-compose.yml" ] || { err "Nothing installed in $DIR"; return 1; }
-  ensure_docker >/dev/null || return 1
-  warn "This stops and removes the ai2vpn containers and images. / 會停止並刪除容器同映像。"
-  yesno "Continue? / 繼續？" n || return 0
-  dc down --rmi all --volumes --remove-orphans || true
-  ok "Containers removed / 已刪除容器"
-  say "Your data (accounts, browser logins, VPN settings, sandbox files) is still in $DIR."
-  printf 'Type %sDELETE%s to also delete that folder, or press Enter to keep it: ' "$B" "$N"
-  IFS= read -r REPLY <"$TTY" || REPLY=""
-  if [ "$REPLY" = DELETE ]; then
-    $SUDO rm -rf "$DIR" && ok "Deleted $DIR"
-  else ok "Kept $DIR"; fi
-}
-
-banner() {
-  say ""
-  say "${B}${C}  ▲ ai2vpn${N}  ${D}AI accounts → VPN → OpenAI-compatible API${N}"
-  if installed; then
-    local st; st="$($DOCKER inspect -f '{{.State.Status}}' ai2vpn 2>/dev/null || echo "not running")"
-    say "  ${D}folder: $DIR · status: $st · port: $(env_get AI2VPN_PORT | grep . || echo 8080)${N}"
+  need_install
+  local dir="$INSTALL_DIR/backups" ts file items=(data .env)
+  ts="$(date +%Y%m%d-%H%M%S)"; file="$dir/ai2vpn-$ts.tar.gz"
+  [ -d "$INSTALL_DIR/sandbox-home" ] && items+=(sandbox-home)
+  if [ -d "$INSTALL_DIR/workspace" ] && [ -n "$(ls -A "$INSTALL_DIR/workspace" 2>/dev/null)" ] && confirm "Include your sandbox projects (workspace/)?" n; then items+=(workspace); fi
+  $SUDO mkdir -p "$dir"
+  info "Stopping ai2vpn for a consistent copy (browser profiles are in use while it runs)…"
+  $COMPOSE stop >/dev/null 2>&1 || true
+  if $SUDO tar -czf "$file" -C "$INSTALL_DIR" "${items[@]}"; then
+    compose_up >/dev/null 2>&1 || true
+    $SUDO chmod 600 "$file"
+    ok "Backup saved: $file ($($SUDO du -h "$file" | awk '{print $1}'))"
+    echo "   It contains your account logins and VPN keys — keep it somewhere safe and private."
   else
-    say "  ${D}not installed yet / 未安裝${N}"
+    compose_up >/dev/null 2>&1 || true
+    die "Backup failed."
+  fi
+}
+list_backups() { ls -1t "$INSTALL_DIR"/backups/ai2vpn-*.tar.gz 2>/dev/null || true; }
+do_list_backups() {
+  need_install
+  local files; files="$(list_backups)"
+  [ -z "$files" ] && { info "No backups yet in $INSTALL_DIR/backups"; return 0; }
+  echo; printf '%sBackups (newest first)%s\n' "$B" "$R"
+  local f; while IFS= read -r f; do printf '  %s  %s\n' "$($SUDO du -h "$f" | awk '{print $1}')" "$f"; done <<<"$files"
+}
+do_restore() {
+  need_install
+  local file="${1:-}"
+  if [ -z "$file" ]; then
+    local files n=0 f pick; files="$(list_backups)"
+    [ -z "$files" ] && die "No backups found in $INSTALL_DIR/backups. Give a file: install.sh restore <file.tar.gz>"
+    echo; printf '%sChoose a backup%s\n' "$B" "$R"
+    while IFS= read -r f; do n=$((n + 1)); printf '  %s%d)%s %s\n' "$C" "$n" "$R" "$(basename "$f")"; done <<<"$files"
+    echo "  0) Cancel"
+    pick="$(ask "Number" 1)"
+    [[ "$pick" =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le "$n" ] || { info "Cancelled."; return 0; }
+    file="$(sed -n "${pick}p" <<<"$files")"
+  fi
+  [ -f "$file" ] || die "File not found: $file"
+  warn "Restoring replaces the current accounts, logins and settings with the ones in the backup."
+  confirm "Restore $(basename "$file")?" n || { info "Cancelled."; return 0; }
+  local ts d; ts="$(date +%Y%m%d-%H%M%S)"
+  $COMPOSE stop >/dev/null 2>&1 || true
+  for d in data sandbox-home; do if [ -d "$INSTALL_DIR/$d" ]; then $SUDO mv "$INSTALL_DIR/$d" "$INSTALL_DIR/$d.before-restore-$ts"; fi; done
+  if [ -f "$INSTALL_DIR/.env" ]; then $SUDO cp "$INSTALL_DIR/.env" "$INSTALL_DIR/.env.before-restore-$ts"; fi
+  $SUDO tar -xzf "$file" -C "$INSTALL_DIR"
+  compose_up
+  ok "Restored. The previous data was kept as *.before-restore-$ts (delete it when you're happy)."
+}
+do_uninstall() {
+  need_install
+  if [ "$PURGE" -eq 1 ]; then
+    warn "This deletes ALL accounts, browser logins, VPN settings and sandbox logins in $INSTALL_DIR."
+    confirm "Really delete everything?" n || { info "Cancelled."; return 0; }
+    $COMPOSE down -v --remove-orphans --rmi local
+    $SUDO rm -rf "$INSTALL_DIR/data" "$INSTALL_DIR/sandbox-home"
+    $SUDO rm -f /usr/local/bin/ai2vpn "$CONF_FILE" 2>/dev/null || true
+    ok "ai2vpn and its data were removed. (Backups in $INSTALL_DIR/backups and projects in $INSTALL_DIR/workspace were kept.)"
+  else
+    confirm "Remove the ai2vpn containers? Your accounts and settings stay in $INSTALL_DIR." y || { info "Cancelled."; return 0; }
+    $COMPOSE down --remove-orphans
+    ok "Containers removed. Your data is kept; choose Install again to bring it back."
   fi
 }
 
-main_menu() {
+# ---------------------------------------------------------------- menu
+header() {
+  if [ "$TTY" -eq 1 ] && [ -t 1 ]; then clear; fi
+  printf '%s' "$P$B"
+  cat <<'EOF'
+        _ ____
+   __ _(_)___ \__   ___ __  _ __
+  / _` | | __) \ \ / / '_ \| '_ \
+ | (_| | |/ __/ \ V /| |_) | | | |
+  \__,_|_|_____| \_/ | .__/|_| |_|
+                     |_|   AI accounts → VPN → OpenAI-compatible API
+EOF
+  printf '%s' "$R"
+  if installed; then
+    local st="${D}unknown (Docker not reachable)${R}"
+    if quick_docker; then
+      local n e; n="$(running_count)"; e="$(expected_count)"
+      if [ "$n" -ge "$e" ]; then st="${G}● running${R}"; elif [ "$n" -gt 0 ]; then st="${Y}● partly running ($n of $e)${R}"; else st="${E}● stopped${R}"; fi
+    fi
+    printf '  Status: %s   Address: %s%s%s\n' "$st" "$B" "$(address)" "$R"
+    printf '  %sFolder: %s · VPN: %s · Sandbox: %s%s\n' "$D" "$INSTALL_DIR" "$(vpn_mode)" "$(sandbox_on && echo on || echo off)" "$R"
+  else
+    printf '  Status: %snot installed%s   %s(will install to %s)%s\n' "$Y" "$R" "$D" "$INSTALL_DIR" "$R"
+  fi
+  echo
+}
+item() { printf '  %s%s)%s %s\n' "$C$B" "$1" "$R" "$2"; }
+title() { printf '  %s%s%s\n  %s\n' "$B" "$1" "$R" "────────────────────────────"; }
+choose() { echo >/dev/tty; ask "  Choose a number" ""; }
+run() {  # run an action in a subshell so an error returns to the menu instead of closing it
+  local rc; set +e; ( set -e; "$@" ); rc=$?; set -e
+  [ "$rc" -eq 0 ] || warn "That did not finish (see the message above)."
+  return 0
+}
+
+page_manage() {
   while :; do
-    banner
-    BACK_LABEL="Exit / 離開" choose "Main menu / 主選單" \
-      "Install / set up again / 安裝或重新設定" \
-      "Update to the latest version / 更新" \
-      "Manage: start, stop, logs, backup, sandbox shell / 管理" \
-      "Settings: password, port, VPN, sandbox / 設定" \
-      "Uninstall / 解除安裝"
-    case "$CHOICE" in
-      1) do_install; pause ;;
-      2) do_update; pause ;;
-      3) do_manage ;;
-      4) do_settings ;;
-      5) do_uninstall; pause ;;
-      0) say "Bye / 再見"; exit 0 ;;
+    header; title "2 · Manage service"
+    item 1 "Status (containers, VPN, exit IP)"; item 2 "Start"; item 3 "Stop"; item 4 "Restart"; item 5 "View logs"
+    item 6 "Open the sandbox terminal (Claude Code / Codex)"; item 0 "Back"
+    case "$(choose)" in
+      1) run do_status; pause ;; 2) run do_start; pause ;; 3) run do_stop; pause ;;
+      4) run do_restart; pause ;; 5) run do_logs; pause ;; 6) run do_shell; pause ;;
+      0|b|q|"") return ;; *) warn "Choose 0–6."; sleep 1 ;;
+    esac
+  done
+}
+page_vpn() {
+  while :; do
+    header; title "3 · Settings › VPN (now: $(vpn_mode))"
+    item 1 "Show VPN status and exit IP"
+    item 2 "Load a WireGuard .conf / OpenVPN .ovpn file and connect"
+    item 3 "Open the VPN page in the web UI: $(address)/#vpn"
+    item 4 "Switch between built-in VPN and gluetun"
+    item 0 "Back"
+    case "$(choose)" in
+      1) run do_vpn_status; pause ;; 2) run do_vpn_file; pause ;; 3) info "Open $(address)/#vpn in your browser."; pause ;;
+      4) run do_vpn_mode; pause ;; 0|b|q|"") return ;; *) warn "Choose 0–4."; sleep 1 ;;
+    esac
+  done
+}
+page_settings() {
+  while :; do
+    header; title "3 · Settings"
+    item 1 "Change port (now $(current_port))"; item 2 "Change admin password"
+    item 3 "Public URL (now $(env_get PUBLIC_URL | grep . || echo automatic))"
+    item 4 "VPN                 › status, load config, built-in / gluetun"
+    item 5 "Sandbox: switch $(sandbox_on && echo off || echo on)"
+    item 6 "Show address, password and folder"
+    item 7 "Use another install folder (find / switch)"; item 0 "Back"
+    echo; printf '  %sAccounts, models, provider fixes and updates are managed in the web UI.%s\n' "$D" "$R"
+    case "$(choose)" in
+      1) run do_port; pause ;; 2) run do_password; pause ;; 3) run do_public_url; pause ;; 4) page_vpn ;;
+      5) run do_sandbox_toggle; pause ;; 6) summary; pause ;; 7) page_folder ;;
+      0|b|q|"") return ;; *) warn "Choose 0–7."; sleep 1 ;;
+    esac
+  done
+}
+page_backup() {
+  while :; do
+    header; title "4 · Backup & restore"
+    item 1 "Back up now"; item 2 "Restore a backup"; item 3 "List backups"; item 0 "Back"
+    case "$(choose)" in
+      1) run do_backup; pause ;; 2) run do_restore; pause ;; 3) run do_list_backups; pause ;;
+      0|b|q|"") return ;; *) warn "Choose 0–3."; sleep 1 ;;
+    esac
+  done
+}
+page_uninstall() {
+  header; title "5 · Uninstall"
+  item 1 "Remove containers, keep my accounts and settings"; item 2 "Remove everything (delete all data)"; item 0 "Back"
+  case "$(choose)" in
+    1) PURGE=0 run do_uninstall; pause ;;
+    2) PURGE=1 run do_uninstall; pause ;;
+    *) return ;;
+  esac
+}
+menu() {
+  trap 'echo' INT   # Ctrl+C stops logs etc. but keeps the menu open
+  while :; do
+    header; title "Main menu"
+    if installed; then item 1 "Update ai2vpn (keeps your accounts and settings)"; else item 1 "Install ai2vpn"; fi
+    item 2 "Manage service      › status, start, stop, restart, logs, sandbox terminal"
+    item 3 "Settings            › port, password, VPN, sandbox, install folder"
+    item 4 "Backup & restore"
+    item 5 "Uninstall"
+    item 0 "Exit"
+    case "$(choose)" in
+      1) if ! installed && [ -z "$SCRIPT_DIR" ]; then INSTALL_DIR="$(ask "  Install folder" "$INSTALL_DIR")"; DIR_ASKED=1; fi
+         run do_install; pause ;;
+      2) page_manage ;; 3) page_settings ;; 4) page_backup ;; 5) page_uninstall ;;
+      0|q|exit) echo; exit 0 ;;
+      "") ;;
+      *) warn "Choose a number from the menu."; sleep 1 ;;
     esac
   done
 }
 
-# ---------------- entry ----------------
-needs_tty=1
-case "${1:-menu}" in start|stop|restart|status|logs|backup|-h|--help|help) needs_tty=0 ;; esac
-if [ "$needs_tty" = 1 ] && ! { : <"$TTY"; } 2>/dev/null; then
-  err "No terminal available for the questions. Download the script and run it in a terminal: bash install.sh"
-  exit 1
+# ---------------------------------------------------------------- main
+[ "$ACTION" = "help" ] || resolve_dir
+if [ -z "$ACTION" ]; then
+  # a terminal with no options → menu; otherwise (automation, or --port/--dir given) → install
+  if [ "$TTY" -eq 1 ] && [ "$YES" -eq 0 ] && [ -z "$PORT" ]; then ACTION="menu"; else ACTION="install"; fi
 fi
-find_dir
-detect_docker >/dev/null 2>&1 || true
-case "${1:-menu}" in
-  menu) main_menu ;;
-  install) do_install ;;
-  update) do_update ;;
-  start) ensure_docker && compose_up && wait_healthy && show_access ;;
-  stop) ensure_docker && dc stop ;;
-  restart) ensure_docker && dc restart && wait_healthy ;;
-  status) ensure_docker && dc ps ;;
-  logs) ensure_docker && dc logs -f --tail 100 ai2vpn ;;
-  backup) do_backup ;;
-  uninstall) do_uninstall ;;
-  -h|--help|help) sed -n '2,9p' "$0" ;;
-  *) err "Unknown command: $1"; sed -n '2,9p' "$0"; exit 1 ;;
+case "$ACTION" in
+  help) sed -n '2,22p' "${BASH_SOURCE[0]:-$0}" 2>/dev/null | sed 's/^# \{0,1\}//' || echo "See $REPO_URL"; exit 0 ;;
+  menu) menu ;;
+  install|update) do_install ;;
+  status) do_status ;; start) do_start ;; stop) do_stop ;; restart) do_restart ;;
+  logs) do_logs ;; shell) do_shell ;; vpn) do_vpn_status ;;
+  port) do_port "$ARG" ;; password) do_password "$ARG" ;;
+  backup) do_backup ;; restore) do_restore "$ARG" ;; uninstall) do_uninstall ;;
 esac

@@ -1,5 +1,7 @@
 # ai2vpn — the container runs the VPN itself (WireGuard / OpenVPN, configured in the web UI).
 #   docker compose up -d   →   open http://<host>:8080
+name: ai2vpn
+
 services:
   ai2vpn:
     build: .

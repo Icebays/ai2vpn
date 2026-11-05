@@ -2,6 +2,8 @@
 # gluetun supports 30+ providers by name (Surfshark, NordVPN, Mullvad, ProtonVPN, PIA, ExpressVPN, …)
 # and ai2vpn shares its network namespace, so every browser request leaves through gluetun.
 #   docker compose -f docker-compose.gluetun.yml up -d
+name: ai2vpn
+
 services:
   gluetun:
     image: qmcgaw/gluetun:latest

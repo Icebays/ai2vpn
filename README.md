@@ -23,41 +23,40 @@ You manage everything from the web interface: adding accounts, signing in, the V
 
 ## Quick start
 
-Run the installer and follow the numbered menu:
+Linux / macOS (on a NAS, run it over SSH):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/icebays/ai2vpn/HEAD/install.sh | bash
 ```
 
-Or, from a clone of this repository:
+Windows (Docker Desktop), in PowerShell:
 
-```bash
-./install.sh
+```powershell
+irm https://raw.githubusercontent.com/icebays/ai2vpn/HEAD/install.ps1 | iex
 ```
 
+In a terminal, the installer shows a numbered menu:
+
 ```
-  ▲ ai2vpn  AI accounts → VPN → OpenAI-compatible API
+  Status: ● running   Address: http://192.168.1.20:8080
+  Folder: /opt/ai2vpn · VPN: built-in · Sandbox: on
 
-Main menu / 主選單
-  1) Install / set up again / 安裝或重新設定
-  2) Update to the latest version / 更新
-  3) Manage: start, stop, logs, backup, sandbox shell / 管理
-  4) Settings: password, port, VPN, sandbox / 設定
-  5) Uninstall / 解除安裝
-  0) Exit / 離開
+  Main menu
+  ────────────────────────────
+  1) Update ai2vpn (keeps your accounts and settings)
+  2) Manage service      › status, start, stop, restart, logs, sandbox terminal
+  3) Settings            › port, password, VPN, sandbox, install folder
+  4) Backup & restore
+  5) Uninstall
+  0) Exit
 ```
 
-**Install** checks Docker (and offers to install it on Linux), downloads ai2vpn to `~/ai2vpn`, and then asks for:
+- **Install** asks for the folder (default `/opt/ai2vpn`, or `~/ai2vpn` on macOS) and the port (8080, or the next free one). It generates an admin password, then asks how to connect to the VPN (built-in, gluetun or none for now) and whether to run the sandbox. It installs Docker if missing (Linux), builds and starts everything, can load your WireGuard/OpenVPN file and connect, and finally prints the address and password.
+- **Shortcut:** afterwards, type **`ai2vpn`** to open the menu again.
+- **Finding an existing install:** the installer finds it by itself, also in a custom folder. It remembers the folder in `/etc/ai2vpn.conf`, asks Docker where the containers were started, and checks common folders, including NAS volumes such as `/volume1/docker/ai2vpn` or `/vol1/1000/Docker/ai2vpn`. If there are several, it lets you pick one. **3 → 7** can also search the whole disk or take a folder you type. `--dir <path>` always wins.
+- **Port written into `docker-compose.yml`:** if you typed the port there by hand, the installer detects it, and **3 → 1** moves it to `.env`.
 
-- an admin password (or generates one)
-- a free port
-- an optional public URL
-- the VPN mode: built-in, gluetun, or none for now
-- whether to run the sandbox
-
-It writes `.env`, builds and starts the containers, and waits until ai2vpn is healthy. With the built-in VPN it can also load your WireGuard `.conf` or OpenVPN `.ovpn` file and connect right away. At the end it prints the web address and password.
-
-The same actions work as direct commands: `./install.sh install | update | start | stop | restart | status | logs | backup | uninstall`.
+**Without the menu (for scripts):** `install.sh install [--dir <path>] [--port <n>]`, `status`, `start`, `stop`, `restart`, `logs`, `shell`, `port <n>`, `password <new>`, `vpn`, `backup`, `restore <file>`, `uninstall [--purge]`, plus `-y` to answer yes to everything. Backups go to `backups/` in the install folder.
 
 <details><summary>Manual setup without the installer</summary>
 
