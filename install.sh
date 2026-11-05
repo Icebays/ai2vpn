@@ -337,25 +337,60 @@ page_folder() {
 }
 
 # ---------------------------------------------------------------- actions
-# git with the GitHub token (if any) passed as a header, so it is never saved in .git/config
+# git with the GitHub token (if any) passed as a header, so it is never saved in .git/config.
+# core.fileMode=false: some NAS / shared volumes can't keep the "executable" flag, which made every
+# script look changed; the Docker images set those flags themselves, so they are ignored here.
 g() {
   if [ -n "${GH_TOKEN:-}" ]; then
-    $SUDO git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')" "$@"
-  else $SUDO git "$@"; fi
+    $SUDO git -c core.fileMode=false -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')" "$@"
+  else $SUDO git -c core.fileMode=false "$@"; fi
 }
-git_update() {  # pull the latest code, keeping local edits (e.g. a changed docker-compose.yml)
-  local dir="$1" stashed=0
-  if [ -n "$($SUDO git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
-    $SUDO git -C "$dir" stash push -q -m "ai2vpn installer $(date +%F)" && stashed=1 && info "Your own changes to the files were set aside and will be put back."
+gl() { $SUDO git -c core.fileMode=false -C "$INSTALL_DIR" "$@"; }   # local git commands
+
+keep_port_in_env() {  # a port typed into docker-compose.yml must survive the update
+  local fp sp i
+  fp="$(fixed_port)"
+  if [ -z "$fp" ]; then
+    # an earlier update may have set the edited docker-compose.yml aside in a stash: look there
+    for i in $(gl stash list 2>/dev/null | grep -n 'ai2vpn installer' | cut -d: -f1); do
+      sp="$(gl diff "stash@{$((i - 1))}^1" "stash@{$((i - 1))}" -- docker-compose.yml 2>/dev/null \
+        | sed -n 's/^+[[:space:]]*-[[:space:]]*"\{0,1\}\([0-9][0-9]*\):8080.*/\1/p' | head -1)"
+      [ -n "$sp" ] && { fp="$sp"; break; }
+    done
+  fi
+  if [ -n "$fp" ] && [ "$(env_get AI2VPN_PORT)" != "$fp" ]; then
+    env_set AI2VPN_PORT "$fp"
+    info "Keeping your port $fp (saved in .env, so it no longer depends on docker-compose.yml)."
+  fi
+  return 0
+}
+
+git_update() {  # pull the latest code, keeping local edits where possible
+  local dir="$1" stashed=0 dirty ts bak f
+  gl config core.fileMode false 2>/dev/null || true   # also for later manual `git pull`
+  keep_port_in_env
+  dirty="$(gl status --porcelain --untracked-files=no 2>/dev/null || true)"
+  if [ -n "$dirty" ]; then
+    if gl stash push -q -m "ai2vpn installer $(date +%F)"; then stashed=1; info "Your own changes to the files were set aside and will be put back."; fi
+    dirty="$(gl status --porcelain --untracked-files=no 2>/dev/null || true)"
+    if [ -n "$dirty" ]; then
+      # still "changed" after setting them aside: the disk can't undo them. Back up, then reset.
+      ts="$(date +%Y%m%d-%H%M%S)"; bak="$dir/backups/local-changes-$ts"
+      $SUDO mkdir -p "$bak"
+      while IFS= read -r f; do f="${f:3}"; [ -f "$dir/$f" ] && $SUDO mkdir -p "$bak/$(dirname "$f")" && $SUDO cp -p "$dir/$f" "$bak/$f"; done <<<"$dirty"
+      warn "Some files still look changed (copied to $bak); resetting them to the official version."
+      gl reset -q --hard HEAD
+    fi
   fi
   if ! g -C "$dir" pull -q --ff-only ${BRANCH:+origin "$BRANCH"}; then
-    if [ "$stashed" -eq 1 ]; then $SUDO git -C "$dir" stash pop -q || true; fi
-    die "Could not download the update. If the repository is private, set GH_TOKEN first."
+    if [ "$stashed" -eq 1 ]; then gl stash pop -q 2>/dev/null || true; fi
+    die "Could not download the update (no internet / GitHub not reachable?). If the repository is private, set GH_TOKEN first."
   fi
-  if [ "$stashed" -eq 1 ] && ! $SUDO git -C "$dir" stash pop -q; then
-    warn "Your own changes clash with the update; the update was kept and your changes are saved in 'git stash list'."
-    $SUDO git -C "$dir" checkout -q -- . 2>/dev/null || true
+  if [ "$stashed" -eq 1 ] && ! gl stash pop -q 2>/dev/null; then
+    gl reset -q --hard HEAD 2>/dev/null || true
+    warn "Your own file changes clash with the update, so the update was kept. Your changes are saved (git stash list); your port and settings are in .env."
   fi
+  ok "Code updated to $(gl log -1 --format='%h %s' 2>/dev/null | cut -c1-70)"
 }
 fetch_code() {
   if [ -n "$SCRIPT_DIR" ] && [ "$INSTALL_DIR" = "$SCRIPT_DIR" ] && has_files; then
