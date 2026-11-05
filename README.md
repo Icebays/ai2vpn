@@ -53,7 +53,13 @@ In a terminal, the installer shows a numbered menu:
 
 - **Install** asks for the folder (default `/opt/ai2vpn`, or `~/ai2vpn` on macOS) and the port (8080, or the next free one). It generates an admin password, then asks how to connect to the VPN (built-in, gluetun or none for now) and whether to run the sandbox. It installs Docker if missing (Linux), builds and starts everything, can load your WireGuard/OpenVPN file and connect, and finally prints the address and password.
 - **Shortcut:** afterwards, type **`ai2vpn`** to open the menu again.
-- **Finding an existing install:** the installer finds it by itself, also in a custom folder. It remembers the folder in `/etc/ai2vpn.conf`, asks Docker where the containers were started, and checks common folders, including NAS volumes such as `/volume1/docker/ai2vpn` or `/vol1/1000/Docker/ai2vpn`. If there are several, it lets you pick one. **3 → 7** can also search the whole disk or take a folder you type. `--dir <path>` always wins.
+- **Finding an existing install:** the installer finds it by itself, also in a custom or renamed folder (anywhere, not only `/opt`). In order:
+  1. the folder it remembered (`/etc/ai2vpn.conf`)
+  2. Docker: where the ai2vpn containers were started, and every compose project Docker knows about (also stopped ones)
+  3. common folders, including NAS volumes such as `/volume1/docker/ai2vpn` or `/vol1/1000/Docker/ai2vpn`
+  4. if none of those know it, a quick disk search (the `locate` database, or the usual data folders, up to 45 s). ai2vpn is recognised by the folder's contents, so the folder can have any name.
+
+  A folder found this way is remembered, so the next run is instant. If there are several, you pick one. **3 → 7**, or **6** while nothing is found, searches the whole disk or takes a folder you type. `--dir <path>` always wins.
 - **Port written into `docker-compose.yml`:** if you typed the port there by hand, the installer detects it, and **3 → 1** moves it to `.env`.
 
 **Without the menu (for scripts):** `install.sh install [--dir <path>] [--port <n>]`, `status`, `start`, `stop`, `restart`, `logs`, `shell`, `port <n>`, `password <new>`, `vpn`, `backup`, `restore <file>`, `uninstall [--purge]`, plus `-y` to answer yes to everything. Backups go to `backups/` in the install folder.

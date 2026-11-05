@@ -5,8 +5,9 @@
 #
 # Run it in a terminal and it shows a numbered menu (install, manage, settings, backup, uninstall).
 # After installing, open the menu again any time with:   ai2vpn
-# An existing install is found automatically, also in a custom folder (saved location, Docker, common
-# folders incl. NAS volumes; menu 3 → 7 can search the whole disk). Or say where it is with --dir <path>.
+# An existing install is found automatically, also in a custom or renamed folder: saved location,
+# Docker (containers, compose projects), common folders incl. NAS volumes, and — if none of those
+# know it — a quick disk search. Menu 3 → 7 searches the whole disk. Or say where it is with --dir <path>.
 #
 # Without a menu (scripts, automation):
 #   install.sh install   [--dir <path>] [--port <n>] [--branch <name>]   install or update
@@ -55,6 +56,7 @@ ok()   { printf '%s✓%s  %s\n' "$G" "$R" "$*"; }
 warn() { printf '%s!!%s  %s\n' "$Y" "$R" "$*" >&2; }
 die()  { printf '%sxx%s  %s\n' "$E" "$R" "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+tty_info() { if [ "${TTY:-0}" -eq 1 ]; then info "$*" >/dev/tty; else info "$*" >&2; fi; }
 
 # questions are read from the terminal, so they also work under `curl … | bash`
 TTY=0; if { : </dev/tty; } 2>/dev/null; then TTY=1; fi
@@ -228,11 +230,17 @@ find_installs() {  # prints every ai2vpn folder found, best guess first
   for f in /etc/ai2vpn.conf "$HOME/.config/ai2vpn.conf"; do
     [ -r "$f" ] && d="$(sed -n 's/^INSTALL_DIR=//p' "$f" | tail -1)" && [ -n "$d" ] && c+=("$d")
   done
-  # folders Docker started the ai2vpn containers from (works for any custom folder, even manual installs)
+  # ask Docker: works for any custom or renamed folder, even manual installs and stopped stacks
   if quick_docker; then
-    while IFS= read -r d; do [ -n "$d" ] && c+=("$d"); done < <( { $DOCKER ps -a --filter label=com.docker.compose.project=ai2vpn \
-        --format '{{.Label "com.docker.compose.project.working_dir"}}'; $DOCKER ps -a --filter name=ai2vpn \
-        --format '{{.Label "com.docker.compose.project.working_dir"}}'; } 2>/dev/null | sort -u)
+    while IFS= read -r d; do [ -n "$d" ] && c+=("$d"); done < <( {
+        # folders the ai2vpn containers were started from (by project, container name or image)
+        for flt in label=com.docker.compose.project=ai2vpn name=ai2vpn ancestor=ai2vpn:latest ancestor=ai2vpn-sandbox:latest; do
+          $DOCKER ps -a --filter "$flt" --format '{{.Label "com.docker.compose.project.working_dir"}}'
+        done
+        # every compose project Docker knows about (also stopped ones) → the folder of its compose file
+        $COMPOSE ls --all --format json 2>/dev/null | grep -o '"ConfigFiles":"[^"]*"' | sed 's/^"ConfigFiles":"//; s/"$//' \
+          | tr ',' '\n' | while IFS= read -r f; do [ -n "$f" ] && dirname "$f"; done
+      } 2>/dev/null | sort -u)
   fi
   for d in /opt/ai2vpn "$HOME/ai2vpn" /root/ai2vpn /srv/ai2vpn /data/ai2vpn /usr/local/ai2vpn \
            /home/*/ai2vpn /opt/*/ai2vpn /srv/*/ai2vpn /data/*/ai2vpn /mnt/*/ai2vpn /mnt/*/*/ai2vpn /media/*/ai2vpn \
@@ -251,11 +259,28 @@ find_installs() {  # prints every ai2vpn folder found, best guess first
   done
   if [ "${1:-}" = "--all" ]; then printf '%s%s' "$out" "$rest"; else printf '%s' "$out"; fi
 }
+quick_search() {  # fast, automatic: locate database, else the usual data folders (time-limited)
+  local roots=() r t="" f hits=""
+  if have plocate || have locate; then
+    local loc; loc="$(command -v plocate || command -v locate)"
+    hits="$($loc -b '\docker-compose.yml' 2>/dev/null | while IFS= read -r f; do d="$(dirname "$f")"; if is_a2v_dir "$d"; then echo "$d"; fi; done || true)"
+    # the locate database can be older than the install: only trust it if it found something
+    [ -n "$hits" ] && { printf '%s\n' "$hits"; return 0; }
+  fi
+  for r in /home /root /opt /srv /data /DATA /mnt /media /share /usr/local /var/services /Users /volume* /vol* /docker /apps /app /storage; do
+    [ -d "$r" ] && roots+=("$r")
+  done
+  [ ${#roots[@]} -eq 0 ] && return 0
+  have timeout && t="timeout 45"
+  tty_info "Looking for an existing ai2vpn install (up to 45 s)…"
+  $SUDO $t find "${roots[@]}" -maxdepth 7 \( -path '*/node_modules' -o -path '*/.git' -o -path '*/profiles' -o -path '*/proc' -o -path '*/@*' -o -path '*/#recycle' -o -path '*/.Trash*' \) -prune \
+    -o -name docker-compose.yml -print 2>/dev/null | while IFS= read -r f; do d="$(dirname "$f")"; if is_a2v_dir "$d"; then echo "$d"; fi; done || true
+}
 search_disk() {  # slow: look everywhere for an ai2vpn docker-compose.yml
   local t=""; have timeout && t="timeout 180"
-  info "Searching the disk (up to 3 minutes)…" >/dev/tty
+  tty_info "Searching the disk (up to 3 minutes)…"
   $SUDO $t find / -maxdepth 9 \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -path /var/lib/docker -o -path /snap -o -path '*/node_modules' -o -path '*/.git' -o -path '*/profiles' \) -prune \
-    -o -name docker-compose.yml -print 2>/dev/null | while IFS= read -r f; do d="$(dirname "$f")"; is_a2v_dir "$d" && echo "$d"; done \
+    -o -name docker-compose.yml -print 2>/dev/null | while IFS= read -r f; do d="$(dirname "$f")"; if is_a2v_dir "$d"; then echo "$d"; fi; done \
     | awk '{ if (system("[ -f \"" $0 "/.env\" ]") == 0) print; else rest = rest $0 "\n" } END { printf "%s", rest }' || true
 }
 remember_dir() {
@@ -284,13 +309,20 @@ resolve_dir() {
   [ -n "$INSTALL_DIR" ] && return 0                                   # --dir or INSTALL_DIR=…
   if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/docker-compose.yml" ] && [ -f "$SCRIPT_DIR/src/server.js" ]; then INSTALL_DIR="$SCRIPT_DIR"; return 0; fi
   local found n; found="$(find_installs)"; n="$(grep -c . <<<"$found" || true)"
+  if [ "${n:-0}" -eq 0 ] && [ "${A2V_NO_SEARCH:-0}" != 1 ]; then
+    # nothing in the usual places: search the disk for a custom folder (only real installs count)
+    found="$(quick_search | while IFS= read -r d; do if [ -f "$d/.env" ]; then (cd "$d" && pwd -P); fi; done | awk '!seen[$0]++' || true)"
+    n="$(grep -c . <<<"$found" || true)"
+  fi
   if [ "${n:-0}" -eq 0 ]; then INSTALL_DIR="$DEFAULT_DIR"; return 0; fi
+  if [ "$n" -ge 1 ] && [ -z "$(find_installs)" ]; then tty_info "Found ai2vpn in $(head -1 <<<"$found")"; fi
   if [ "$n" -eq 1 ] || [ "$TTY" -eq 0 ] || [ "$YES" -eq 1 ]; then
     INSTALL_DIR="$(head -1 <<<"$found")"; [ "$n" -gt 1 ] && warn "Several installs found; using $INSTALL_DIR (choose another with --dir)."
     return 0
   fi
   pick_dir "$found" || INSTALL_DIR="$(head -1 <<<"$found")"
 }
+remember_found() { installed && [ ! -r "$CONF_FILE" ] && remember_dir; return 0; }
 page_folder() {
   header; title "3 · Settings › Install folder"
   printf '  Now using: %s%s%s\n' "$B" "$INSTALL_DIR" "$R"
@@ -775,8 +807,10 @@ menu() {
     item 3 "Settings            › port, password, VPN, sandbox, install folder"
     item 4 "Backup & restore"
     item 5 "Uninstall"
+    installed || item 6 "Find an existing install (custom folder / search the whole disk)"
     item 0 "Exit"
     case "$(choose)" in
+      6) page_folder ;;
       1) if ! installed && [ -z "$SCRIPT_DIR" ]; then INSTALL_DIR="$(ask "  Install folder" "$INSTALL_DIR")"; DIR_ASKED=1; fi
          run do_install; pause ;;
       2) page_manage ;; 3) page_settings ;; 4) page_backup ;; 5) page_uninstall ;;
@@ -788,7 +822,7 @@ menu() {
 }
 
 # ---------------------------------------------------------------- main
-[ "$ACTION" = "help" ] || resolve_dir
+if [ "$ACTION" != "help" ]; then resolve_dir; remember_found 2>/dev/null || true; fi
 if [ -z "$ACTION" ]; then
   # a terminal with no options → menu; otherwise (automation, or --port/--dir given) → install
   if [ "$TTY" -eq 1 ] && [ "$YES" -eq 0 ] && [ -z "$PORT" ]; then ACTION="menu"; else ACTION="install"; fi
