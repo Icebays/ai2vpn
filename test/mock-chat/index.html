@@ -95,6 +95,12 @@
   document.getElementById('prompt').addEventListener('drop', (e) => { e.preventDefault(); addFiles(e.dataTransfer.files); });
 
   const log = document.getElementById('log');
+  // Each chat gets its own URL (?c=<id>) like real sites; history survives reloads.
+  // With ?no-url the site keeps one URL for every chat (like a "temporary chat").
+  const params = new URLSearchParams(location.search);
+  let chatId = params.get('c');
+  const saveChat = () => { if (chatId) localStorage.setItem('mockchat:' + chatId, log.innerHTML); };
+  if (chatId && localStorage.getItem('mockchat:' + chatId)) log.innerHTML = localStorage.getItem('mockchat:' + chatId);
   const prompt = document.getElementById('prompt');
   const stop = document.getElementById('stop');
   let stopped = false;
@@ -103,10 +109,16 @@
     const text = prompt.value.trim();
     if (!text) return;
     prompt.value = '';
+    if (!chatId && !params.has('no-url')) {
+      chatId = Math.random().toString(36).slice(2, 10);
+      params.set('c', chatId);
+      history.pushState(null, '', '?' + params.toString());
+    }
     const u = document.createElement('div');
     u.className = 'msg user';
     u.textContent = text;
     log.appendChild(u);
+    const turn = log.querySelectorAll('.msg.user').length;
     await new Promise(r => setTimeout(r, 400));
     const a = document.createElement('div');
     a.className = 'msg assistant';
@@ -123,7 +135,7 @@
     attached.length = 0;
     document.getElementById('atts').innerHTML = '';
     const modelInfo = ` [model: ${document.getElementById('model-btn').textContent}, think: ${think.getAttribute('aria-pressed') === 'true' ? 'on' : 'off'}]`;
-    const words = ('Hello from the **mock** model. You said: ' + text.slice(0, 2000).replace(/\s+/g, ' ') + fileInfo + modelInfo).split(' ');
+    const words = ('Hello from the **mock** model. You said: ' + text.slice(0, 2000).replace(/\s+/g, ' ') + fileInfo + modelInfo + ` [turn: ${turn}]`).split(' ');
     let html = '';
     for (const w of words) {
       if (stopped) break;
@@ -134,6 +146,7 @@
     md.innerHTML += '<ul><li>one</li><li>two</li></ul><pre><code class="language-js">console.log(1 &lt; 2);\n</code></pre>';
     await new Promise(r => setTimeout(r, 300));
     stop.hidden = true;
+    saveChat();
   }
   document.getElementById('send').onclick = send;
   prompt.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });

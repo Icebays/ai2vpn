@@ -339,6 +339,7 @@ admin.put(
     const s = store.settings;
     if (b.publicUrl !== undefined) s.publicUrl = String(b.publicUrl).trim().replace(/\/+$/, '');
     if (b.idleMinutes !== undefined) s.idleMinutes = Math.max(0, Number(b.idleMinutes) || 0);
+    if (b.continueChats !== undefined) s.continueChats = !!b.continueChats;
     if (b.requestTimeoutSec !== undefined) s.requestTimeoutSec = Math.min(3600, Math.max(30, Number(b.requestTimeoutSec) || 300));
     if (b.providerOverrides !== undefined) {
       if (typeof b.providerOverrides !== 'object' || Array.isArray(b.providerOverrides)) return res.status(400).json({ error: 'providerOverrides must be an object' });

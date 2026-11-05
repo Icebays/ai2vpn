@@ -5,6 +5,7 @@ const { runChat, flattenMessages, ChatError } = require('./driver');
 const { safeEqual, KeyedQueue } = require('./util');
 const { buildOpenApi } = require('./openapi');
 const { directLogin } = require('./login');
+const { Conversations } = require('./conversations');
 const { FileStore, fileObject, extractAttachments, materialize, mimeFor, MAX_FILE_BYTES } = require('./attachments');
 const Busboy = require('busboy');
 const fsp = require('fs').promises;
@@ -37,6 +38,7 @@ function createOpenAIRouter({ store, browsers }) {
   const router = express.Router({ mergeParams: true });
   const queue = new KeyedQueue(Number(process.env.MAX_QUEUE || 20));
   const files = new FileStore(store.dir);
+  const conversations = new Conversations(store.dir);
   const isMasterKey = (req) => {
     const key = getKey(req);
     return !!(key && store.settings.masterKey && safeEqual(key, store.settings.masterKey));
@@ -155,49 +157,87 @@ function createOpenAIRouter({ store, browsers }) {
     account.stats.lastUsed = Date.now();
     store.save();
 
+    // Same API conversation → same web chat (see src/conversations.js).
+    const conversationId = String(body.conversation_id || req.headers['x-conversation-id'] || '').slice(0, 200) || null;
+    const forceNew = body.new_chat === true || /^(1|true|yes)$/i.test(String(req.headers['x-new-chat'] || ''));
+    const lastIndex = body.messages.length - 1;
+    const lastMsg = body.messages[lastIndex];
+    const canContinue = store.settings.continueChats !== false && !forceNew && lastMsg && lastMsg.role === 'user';
+    let sentText = ''; // exactly what the client received (streaming)
+
+    // If the session expired, sign in again with the saved credentials and retry once.
+    const withRelogin = async (fn) => {
+      try {
+        return await fn();
+      } catch (e) {
+        const c = account.credentials;
+        if (e.code !== 'not_logged_in' || !c || c.autoRelogin === false || !c.email) throw e;
+        console.log(`[api] ${account.slug}: session expired, signing in again`);
+        const r = await directLogin({ browsers, store, account, email: c.email, password: c.password, totpSecret: c.totpSecret });
+        if (!r.loggedIn) {
+          e.message += ` Automatic re-login did not finish: ${r.needsUser || 'unknown reason'}`;
+          throw e;
+        }
+        account.lastCheck = { loggedIn: true, at: Date.now(), url: r.url };
+        return fn();
+      }
+    };
+
     try {
-      const chat = async () => {
-        let tmp = null;
-        try {
-          let fileList = [];
-          if (attachments.length) {
-            tmp = await materialize(attachments, store.dir);
-            fileList = attachments.map((a, i) => ({ path: tmp.paths[i], name: a.name, mime: a.mime }));
+      const result = await queue.run(account.id, async () => {
+        const entry = canContinue ? conversations.find(account.id, body.messages, conversationId) : null;
+        const attempt = async (resume) => {
+          // Continuing: only the newest user message (and its files) goes into the existing chat.
+          const msgs = resume ? [lastMsg] : body.messages;
+          const p = flattenMessages(msgs) || prompt;
+          const atts = resume ? attachments.filter((a) => a.messageIndex === lastIndex) : attachments;
+          let tmp = null;
+          try {
+            let fileList = [];
+            if (atts.length) {
+              tmp = await materialize(atts, store.dir);
+              fileList = atts.map((a, i) => ({ path: tmp.paths[i], name: a.name, mime: a.mime }));
+            }
+            return await runChat({
+              browsers,
+              store,
+              account,
+              prompt: p,
+              files: fileList,
+              resume,
+              model: body.model,
+              signal: ac.signal,
+              timeoutMs: (Number(store.settings.requestTimeoutSec) || 300) * 1000,
+              onDelta: stream
+                ? (d) => {
+                    sentText += d;
+                    res.write(chunk({ content: d }));
+                  }
+                : null,
+            });
+          } finally {
+            if (tmp) fsp.rm(tmp.dir, { recursive: true, force: true }).catch(() => {});
           }
-          return await runChatOnce(fileList);
-        } finally {
-          if (tmp) fsp.rm(tmp.dir, { recursive: true, force: true }).catch(() => {});
-        }
-      };
-      const runChatOnce = (fileList) =>
-        runChat({
-          browsers,
-          store,
-          account,
-          prompt,
-          files: fileList,
-          model: body.model,
-          signal: ac.signal,
-          timeoutMs: (Number(store.settings.requestTimeoutSec) || 300) * 1000,
-          onDelta: stream ? (d) => res.write(chunk({ content: d })) : null,
-        });
-      const text = await queue.run(account.id, async () => {
+        };
+        let r;
         try {
-          return await chat();
+          r = await withRelogin(() => attempt(entry));
         } catch (e) {
-          // Session expired: sign in again with the saved credentials, then retry once.
-          const c = account.credentials;
-          if (e.code !== 'not_logged_in' || !c || c.autoRelogin === false || !c.email) throw e;
-          console.log(`[api] ${account.slug}: session expired, signing in again`);
-          const r = await directLogin({ browsers, store, account, email: c.email, password: c.password, totpSecret: c.totpSecret });
-          if (!r.loggedIn) {
-            e.message += ` Automatic re-login did not finish: ${r.needsUser || 'unknown reason'}`;
-            throw e;
-          }
-          account.lastCheck = { loggedIn: true, at: Date.now(), url: r.url };
-          return chat();
+          // The old chat couldn't be continued (deleted, closed…): start a new one with the full history.
+          if (!entry || sentText || ['aborted', 'not_logged_in'].includes(e.code)) throw e;
+          console.log(`[api] ${account.slug}: could not continue the earlier chat (${e.message}) — starting a new one`);
+          r = await withRelogin(() => attempt(null));
         }
+        conversations.remember(account.id, body.messages, stream ? sentText : r.text, {
+          url: r.url,
+          unique: r.unique,
+          token: r.token,
+          conversationId,
+          consumedKey: entry && entry.key,
+        });
+        return r;
       });
+      const text = result.text;
       const usage = { prompt_tokens: approxTokens(prompt), completion_tokens: approxTokens(text), total_tokens: approxTokens(prompt) + approxTokens(text) };
       if (stream) {
         clearInterval(keepAlive);

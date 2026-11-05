@@ -734,13 +734,14 @@ function renderSettings() {
   $('#set-public-hint').textContent = `Currently used: ${(s.publicUrl || s.envPublicUrl || s.detectedBase)}. Leave empty to auto-detect from the request.`;
   $('#set-idle').value = s.idleMinutes;
   $('#set-timeout').value = s.requestTimeoutSec;
+  $('#set-continue').checked = s.continueChats !== false;
   $('#set-overrides').value = JSON.stringify(s.providerOverrides || {}, null, 2);
   $('#pw-locked').hidden = !s.passwordEnvLocked;
   $('#pw-form').hidden = s.passwordEnvLocked;
 }
 $('#set-save').onclick = async () => {
   try {
-    await api('/api/settings', { method: 'PUT', body: { publicUrl: $('#set-public').value, idleMinutes: $('#set-idle').value, requestTimeoutSec: $('#set-timeout').value } });
+    await api('/api/settings', { method: 'PUT', body: { publicUrl: $('#set-public').value, idleMinutes: $('#set-idle').value, requestTimeoutSec: $('#set-timeout').value, continueChats: $('#set-continue').checked } });
     await loadSettings(); await loadAccounts(); renderSettings(); toast('Saved');
   } catch (e) { toast(e.message, true); }
 };

@@ -65,9 +65,19 @@ print(r.choices[0].message.content)
 
 **Keys.** Each account has its own key (`sk-a2v-…`), and the key decides which account answers. The **master key** (API tab) works for every account: set `model` to the account slug or to a provider id such as `claude`.
 
-**How a request runs.** Each request opens a fresh chat in the web UI and types the prompt. For multi-turn requests, the earlier messages are replayed in the prompt as a transcript. Requests to the same account are queued (one at a time per account); different accounts run in parallel. Token usage is estimated at 4 characters per token.
+**How a request runs.** A new conversation opens a fresh chat in the web UI and types the prompt. Follow-ups go into the same chat (see [Conversations](#conversations)). When a history can't be matched to an existing chat, the earlier messages are replayed in the prompt as a transcript. Requests to the same account are queued (one at a time per account); different accounts run in parallel. Token usage is estimated at 4 characters per token.
 
 For ChatGPT, a `model` value that isn't an alias (for example `gpt-5`) is passed to `chatgpt.com/?model=…`.
+
+## Conversations
+
+Follow-up messages stay in the same web chat. Chat apps resend the whole history every time; ai2vpn recognises it and sends only the newest message into the chat where the conversation is already happening. On claude.ai you see one chat per conversation, not one per message.
+
+- **How it matches:** the history before your new message must be exactly what ai2vpn last saw, including its own reply. System prompts are ignored when matching.
+- **When it starts a new chat instead:** if you edit an earlier message, regenerate, or switch apps, ai2vpn opens a new web chat and pastes the full history, as before.
+- **Explicit IDs:** API users can pass `conversation_id` in the body, or the `X-Conversation-Id` header, and send only the new message each time. `new_chat: true` (or `X-New-Chat: 1`) forces a fresh chat.
+- **If the old chat is gone** (deleted on the website, logged out…), ai2vpn starts a new chat with the full history automatically.
+- **Turn it off** in Settings → General if you want a new chat for every request.
 
 ## Choosing the model
 

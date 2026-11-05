@@ -303,6 +303,79 @@ async function main() {
     assert.ok(relog.json.choices[0].message.content.includes('after expiry'));
     step('expired session → automatic re-login → request succeeds');
 
+    // ---- one API conversation = one web chat ----
+    const a5 = await mk('Conversation');
+    await req('POST', `/api/accounts/${a5.id}/login`, { email: 'u@example.com', password: 'hunter2' });
+    const k5 = { authorization: `Bearer ${a5.apiKey}` };
+    const say = async (messages, extra = {}) => {
+      const r = await req('POST', '/v1/chat/completions', { messages, ...extra }, k5);
+      assert.equal(r.status, 200, r.text);
+      return r.json.choices[0].message.content;
+    };
+    const sayStream = async (messages) => {
+      const r = await fetch(`${BASE}/v1/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', ...k5 }, body: JSON.stringify({ stream: true, messages }) });
+      return (await r.text()).split('\n').filter((l) => l.startsWith('data: {')).map((l) => JSON.parse(l.slice(6))).map((c) => (c.choices[0] && c.choices[0].delta.content) || '').join('');
+    };
+    const turnOf = (t) => Number((t.match(/\[turn: (\d+)\]/) || [])[1]);
+    let hist = [{ role: 'system', content: 'be nice' }, { role: 'user', content: 'first message' }];
+    let c = await say(hist);
+    assert.equal(turnOf(c), 1, c);
+    hist.push({ role: 'assistant', content: c }, { role: 'user', content: 'second message' });
+    c = await say(hist);
+    assert.equal(turnOf(c), 2, c);
+    assert.ok(c.includes('You said: second message [model') && !c.includes('[User]'), 'only the new message should be sent: ' + c);
+    // streamed reply, and a changed system prompt (ignored for matching)
+    hist = [{ role: 'system', content: 'a different system prompt' }, ...hist.slice(1), { role: 'assistant', content: c }, { role: 'user', content: 'third message' }];
+    c = await sayStream(hist);
+    assert.equal(turnOf(c), 3, c);
+    hist.push({ role: 'assistant', content: c }, { role: 'user', content: 'fourth message' });
+    c = await say(hist);
+    assert.equal(turnOf(c), 4, c);
+    step('follow-ups continue the same web chat (only the new message is sent, streaming too)');
+
+    // another conversation in between, then back: the first chat is reopened by its URL
+    const otherConv = await say([{ role: 'user', content: 'other topic' }]);
+    assert.equal(turnOf(otherConv), 1);
+    hist.push({ role: 'assistant', content: c }, { role: 'user', content: 'fifth message' });
+    c = await say(hist);
+    assert.equal(turnOf(c), 5, c);
+    step('two conversations interleaved → each keeps its own web chat');
+
+    // edited history → can't match → new chat with the full transcript
+    const edited = [{ role: 'user', content: 'first message' }, { role: 'assistant', content: 'something else entirely' }, { role: 'user', content: 'next' }];
+    c = await say(edited);
+    assert.equal(turnOf(c), 1, c);
+    assert.ok(c.includes('Below is a conversation transcript'), c);
+    // explicit conversation id: the client only sends the new message
+    assert.equal(turnOf(await say([{ role: 'user', content: 'id one' }], { conversation_id: 'abc' })), 1);
+    assert.equal(turnOf(await say([{ role: 'user', content: 'id two' }], { conversation_id: 'abc' })), 2);
+    // forced new chat
+    assert.equal(turnOf(await say([{ role: 'user', content: 'id three' }], { conversation_id: 'abc', new_chat: true })), 1);
+    step('edited history → new chat; conversation_id; new_chat');
+
+    // site without per-chat URLs: continue only while that chat is still the open one
+    await req('PATCH', `/api/accounts/${a5.id}`, { override: { newChatUrl: `${BASE}/__mock/?no-url` } });
+    let x = [{ role: 'user', content: 'x one' }];
+    let xc = await say(x);
+    x.push({ role: 'assistant', content: xc }, { role: 'user', content: 'x two' });
+    xc = await say(x);
+    assert.equal(turnOf(xc), 2, xc);
+    await say([{ role: 'user', content: 'y one' }]);
+    x.push({ role: 'assistant', content: xc }, { role: 'user', content: 'x three' });
+    xc = await say(x);
+    assert.equal(turnOf(xc), 1, 'chat X is gone from the tab → new chat with transcript: ' + xc);
+    assert.ok(xc.includes('Below is a conversation transcript'));
+    await req('PATCH', `/api/accounts/${a5.id}`, { override: null });
+    step('site without chat URLs: continues in place, falls back safely');
+
+    await req('PUT', '/api/settings', { continueChats: false });
+    let off = [{ role: 'user', content: 'off one' }];
+    const offc = await say(off);
+    off.push({ role: 'assistant', content: offc }, { role: 'user', content: 'off two' });
+    assert.equal(turnOf(await say(off)), 1);
+    await req('PUT', '/api/settings', { continueChats: true });
+    step('setting off → a new chat for every request');
+
     const vpn = await req('GET', '/api/vpn');
     assert.ok(vpn.json.status && vpn.json.presets.length > 5);
     step('VPN status endpoint (capable=' + vpn.json.status.capable + ')');

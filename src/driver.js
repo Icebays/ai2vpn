@@ -3,6 +3,7 @@ const { pageSnapshot } = require('./extract');
 const { resolveProvider } = require('./providers');
 const { sleep } = require('./util');
 const { selectModel } = require('./models');
+const crypto = require('crypto');
 
 /**
  * Turn an OpenAI-style message list into one prompt for a chat web UI.
@@ -54,7 +55,43 @@ class ChatError extends Error {
  * Send one prompt through the provider's web UI and stream the reply.
  * onDelta(textChunk) is called as new text appears.
  */
-async function runChat({ browsers, store, account, prompt, model, onDelta, signal, timeoutMs, files = [] }) {
+/**
+ * Per-page memory of which conversation the open chat belongs to. Any navigation that
+ * ai2vpn didn't do itself (login check, someone clicking in the remote browser…) clears it.
+ */
+const pageState = new WeakMap();
+function stateFor(page) {
+  let st = pageState.get(page);
+  if (!st) {
+    st = { token: null, inChat: false };
+    pageState.set(page, st);
+    page.on('framenavigated', (f) => {
+      if (f === page.mainFrame() && !st.inChat) st.token = null;
+    });
+  }
+  return st;
+}
+
+function normUrl(u) {
+  try {
+    const x = new URL(u);
+    return (x.origin + x.pathname).replace(/\/+$/, '') + x.search;
+  } catch (e) {
+    return String(u || '');
+  }
+}
+
+/** True when the URL identifies one particular chat (e.g. /chat/<id>), not the "new chat" page. */
+function isChatUrl(url, provider) {
+  const n = normUrl(url);
+  return !!n && ![provider.newChatUrl, provider.homeUrl, provider.loginUrl].filter(Boolean).map(normUrl).includes(n) && /^https?:/.test(n);
+}
+
+/**
+ * resume: { url, unique, token } of an existing web chat to continue, or null for a new chat.
+ * Returns { text, url, unique, token } — where the chat now lives.
+ */
+async function runChat({ browsers, store, account, prompt, model, onDelta, signal, timeoutMs, files = [], resume = null }) {
   const provider = resolveProvider(store, account);
   let sel = { ...provider.selectors, loggedOutUrl: provider.loggedOutUrl };
   if (!sel.input || !sel.assistant) throw new ChatError('Provider is missing input/assistant selectors', 500, 'config_error');
@@ -62,7 +99,25 @@ async function runChat({ browsers, store, account, prompt, model, onDelta, signa
   browsers.setBusy(account.id, true);
   try {
     const wantModel = requestedModel(model, account, provider);
-    await page.goto(provider.newChatUrl || provider.homeUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    const st = stateFor(page);
+    let continuing = false;
+    if (resume && resume.unique && isChatUrl(resume.url, provider)) {
+      continuing = true;
+      if (normUrl(page.url()) === normUrl(resume.url)) log(account, 'continuing in the open chat');
+      else {
+        log(account, `reopening chat ${resume.url}`);
+        st.inChat = true;
+        await page.goto(resume.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      }
+    } else if (resume && resume.token && st.token === resume.token) {
+      continuing = true; // site has no per-chat URL, but the same chat is still open in the tab
+      log(account, 'continuing in the open chat');
+    } else {
+      if (resume) throw new ChatError('The earlier web chat is no longer open', 409, 'chat_gone');
+      st.inChat = true;
+      await page.goto(provider.newChatUrl || provider.homeUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    }
+    st.inChat = true;
 
     const input = page.locator(sel.input).first();
     // Wait for the prompt box; bail out early if the page clearly shows a logged-out state.
@@ -222,11 +277,16 @@ async function runChat({ browsers, store, account, prompt, model, onDelta, signa
     log(account, `ended: ${endReason}`);
     if (!final.trim()) throw new ChatError('Empty reply from provider', 502, 'empty_reply');
     log(account, `reply finished (${final.length} chars)`);
-    return final;
+    await sleep(300); // let the site update the URL to the chat's own address
+    const url = page.url();
+    st.token = crypto.randomBytes(8).toString('hex');
+    return { text: final, url, unique: isChatUrl(url, provider), token: st.token, continued: continuing };
   } catch (e) {
     if (e.code !== 'aborted') await saveDebug(store, account, page, e).catch(() => {});
     throw e;
   } finally {
+    const st = pageState.get(page);
+    if (st) st.inChat = false;
     browsers.setBusy(account.id, false);
   }
 }
