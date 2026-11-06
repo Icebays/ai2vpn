@@ -164,6 +164,9 @@ function createOpenAIRouter({ store, browsers }) {
     const lastMsg = body.messages[lastIndex];
     const canContinue = store.settings.continueChats !== false && !forceNew && lastMsg && lastMsg.role === 'user';
     let sentText = ''; // exactly what the client received (streaming)
+    // incognito / temporary chat: per request (body or header), else the account's setting
+    const incHeader = req.headers['x-incognito'];
+    const incognito = body.incognito !== undefined ? !!body.incognito : incHeader !== undefined ? /^(1|true|yes|on)$/i.test(String(incHeader)) : !!account.incognito;
 
     // If the session expired, sign in again with the saved credentials and retry once.
     const withRelogin = async (fn) => {
@@ -205,6 +208,7 @@ function createOpenAIRouter({ store, browsers }) {
               prompt: p,
               files: fileList,
               resume,
+              incognito,
               model: body.model,
               signal: ac.signal,
               timeoutMs: (Number(store.settings.requestTimeoutSec) || 300) * 1000,

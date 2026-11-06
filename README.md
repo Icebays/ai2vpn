@@ -124,6 +124,22 @@ Follow-up messages stay in the same web chat. Chat apps resend the whole history
 - **If the old chat is gone** (deleted on the website, logged out…), ai2vpn starts a new chat with the full history automatically.
 - **Turn it off** in Settings → General if you want a new chat for every request.
 
+## Incognito accounts
+
+Tick **Incognito** when adding an account, or later in its settings. API chats then use the site's private mode, so they **don't appear in the account's chat history**:
+
+| Site | Mode used |
+|---|---|
+| ChatGPT | Temporary chat (`chatgpt.com/?temporary-chat=true`) |
+| Claude | Incognito chat (`claude.ai/new?incognito`, or the incognito button) |
+| Gemini | Temporary chat button |
+| Grok | Private chat button |
+
+- **Verified before sending:** if the private mode can't be switched on (for example, the site moved its button), the request fails with `incognito_unavailable` and nothing is sent. ai2vpn never falls back to a normal, saved chat.
+- **Per request:** `"incognito": true/false` in the body, or the `X-Incognito: 1` header, overrides the account setting.
+- **Follow-ups** stay in the same private chat while it's open.
+- **What it doesn't cover:** the site's own data policies still apply.
+
 ## Choosing the model
 
 Put the model in the API's `model` field. ai2vpn opens the site's own model menu and clicks the matching entry before sending, including entries under "More models" / "Legacy models" submenus.

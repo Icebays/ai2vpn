@@ -98,6 +98,8 @@ function accountView(a, req) {
     homeUrl: p.homeUrl,
     apiKey: a.apiKey,
     disabled: !!a.disabled,
+    incognito: !!a.incognito,
+    incognitoSupported: !!(p.incognito && (p.incognito.url || p.incognito.button)),
     createdAt: a.createdAt,
     override: a.override || null,
     running: browsers.isRunning(a.id),
@@ -144,7 +146,7 @@ admin.get('/accounts', (req, res) => res.json(store.accounts.map((a) => accountV
 admin.post(
   '/accounts',
   wrap((req, res) => {
-    const { name, provider, slug } = req.body || {};
+    const { name, provider, slug, incognito } = req.body || {};
     const known = listProviders(store).map((p) => p.id);
     if (!known.includes(provider)) return res.status(400).json({ error: 'Unknown provider' });
     const p = resolveProvider(store, { provider });
@@ -154,6 +156,7 @@ admin.post(
       name: String(name || p.name).slice(0, 80),
       provider,
       apiKey: newApiKey(),
+      incognito: !!incognito,
       createdAt: Date.now(),
       stats: { requests: 0, errors: 0 },
     };
@@ -171,6 +174,7 @@ admin.patch(
     if (b.name !== undefined) a.name = String(b.name).slice(0, 80);
     if (b.slug !== undefined) a.slug = uniqueSlug(b.slug, a.id);
     if (b.disabled !== undefined) a.disabled = !!b.disabled;
+    if (b.incognito !== undefined) a.incognito = !!b.incognito;
     if (b.override !== undefined) {
       if (b.override && typeof b.override !== 'object') return res.status(400).json({ error: 'override must be an object' });
       a.override = b.override && Object.keys(b.override).length ? b.override : undefined;

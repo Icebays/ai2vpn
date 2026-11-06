@@ -387,6 +387,43 @@ async function main() {
     await req('PUT', '/api/settings', { continueChats: true });
     step('setting off → a new chat for every request');
 
+    // ---- incognito / temporary chats ----
+    const a6 = await mk('Incognito');
+    await req('POST', `/api/accounts/${a6.id}/login`, { email: 'u@example.com', password: 'hunter2' });
+    await req('PATCH', `/api/accounts/${a6.id}`, { incognito: true });
+    const k6 = { authorization: `Bearer ${a6.apiKey}` };
+    const incOf = (t) => (t.match(/\[incognito: (on|off)\]/) || [])[1];
+    const sayAs = async (key, messages, extra = {}, headers = {}) => req('POST', '/v1/chat/completions', { messages, ...extra }, { ...key, ...headers });
+    let ir = await sayAs(k6, [{ role: 'user', content: 'secret one' }]);
+    assert.equal(ir.status, 200, ir.text);
+    let it = ir.json.choices[0].message.content;
+    assert.equal(incOf(it), 'on', it);
+    // follow-up stays in the same temporary chat
+    ir = await sayAs(k6, [{ role: 'user', content: 'secret one' }, { role: 'assistant', content: it }, { role: 'user', content: 'secret two' }]);
+    it = ir.json.choices[0].message.content;
+    assert.equal(incOf(it), 'on', it);
+    assert.ok(/\[turn: 2\]/.test(it), it);
+    step('account set to incognito → temporary chat (URL mode), follow-ups continue in it');
+
+    assert.equal(incOf((await sayAs(k6, [{ role: 'user', content: 'x' }], { incognito: false })).json.choices[0].message.content), 'off');
+    assert.equal(incOf((await sayAs(k5, [{ role: 'user', content: 'y' }], {}, { 'x-incognito': '1' })).json.choices[0].message.content), 'on');
+    step('per request: "incognito": false / X-Incognito: 1 override the account');
+
+    await req('PATCH', `/api/accounts/${a6.id}`, { override: { incognito: { button: '#incognito-btn', indicator: '#incognito-on' } } });
+    assert.equal(incOf((await sayAs(k6, [{ role: 'user', content: 'via button' }])).json.choices[0].message.content), 'on');
+    step('incognito via a toggle button, verified by its indicator');
+
+    await req('PATCH', `/api/accounts/${a6.id}`, { override: { incognito: { button: '#no-such-button', indicator: '#incognito-on' } } });
+    ir = await sayAs(k6, [{ role: 'user', content: 'must not be sent' }]);
+    assert.equal(ir.status, 502, ir.text);
+    assert.equal(ir.json.error.code, 'incognito_unavailable');
+    await req('PATCH', `/api/accounts/${a6.id}`, { override: { incognito: null } });
+    ir = await sayAs(k6, [{ role: 'user', content: 'no mode' }]);
+    assert.equal(ir.status, 400, ir.text);
+    assert.equal(ir.json.error.code, 'incognito_unavailable');
+    await req('PATCH', `/api/accounts/${a6.id}`, { override: null });
+    step('incognito that cannot be switched on → error, nothing sent in normal mode');
+
     const vpn = await req('GET', '/api/vpn');
     assert.ok(vpn.json.status && vpn.json.presets.length > 5);
     step('VPN status endpoint (capable=' + vpn.json.status.capable + ')');

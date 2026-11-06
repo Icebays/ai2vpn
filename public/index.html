@@ -281,6 +281,8 @@ sudo apt install …</pre>
     <label>Service<div class="provider-picker" id="pp"></div></label>
     <label>Name<input id="acc-name" placeholder="e.g. ChatGPT Plus (work)"></label>
     <label>Model name / slug <span class="muted small">(used as <code>model</code> in API calls)</span><input id="acc-slug" placeholder="auto"></label>
+    <label class="check" id="acc-incognito-row"><input type="checkbox" id="acc-incognito"> <span>Incognito: use the site's temporary / private chats, so API conversations are <b>not saved</b> in this account's history</span></label>
+    <p class="muted small" id="acc-incognito-note" hidden>This service has no incognito / temporary chat mode.</p>
     <div class="actions right">
       <button class="btn ghost" data-close>Cancel</button>
       <button class="btn primary" id="acc-create">Create &amp; sign in</button>

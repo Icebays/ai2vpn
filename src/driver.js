@@ -84,14 +84,85 @@ function normUrl(u) {
 /** True when the URL identifies one particular chat (e.g. /chat/<id>), not the "new chat" page. */
 function isChatUrl(url, provider) {
   const n = normUrl(url);
-  return !!n && ![provider.newChatUrl, provider.homeUrl, provider.loginUrl].filter(Boolean).map(normUrl).includes(n) && /^https?:/.test(n);
+  const notChats = [provider.newChatUrl, provider.homeUrl, provider.loginUrl, provider.incognito && provider.incognito.url];
+  return !!n && !notChats.filter(Boolean).map(normUrl).includes(n) && /^https?:/.test(n);
+}
+
+/** True when an incognito/temporary toggle looks switched on. Runs in the page. */
+function toggleIsOn(el) {
+  const a = (k) => (el.getAttribute(k) || '').toLowerCase();
+  return (
+    a('aria-pressed') === 'true' ||
+    a('aria-checked') === 'true' ||
+    ['on', 'checked', 'active', 'open'].includes(a('data-state')) ||
+    /(^|[\s_-])(active|selected|checked|on)([\s_-]|$)|--active|--selected/i.test(el.className || '') ||
+    /turn off|exit|leave|disable/i.test(a('aria-label'))
+  );
+}
+
+/**
+ * Make sure the new chat is incognito / temporary (not saved in the account's history).
+ * Throws instead of silently chatting in normal mode.
+ */
+async function enableIncognito(page, provider, account) {
+  const inc = provider.incognito || {};
+  const visibleOne = async (q) => {
+    if (!q) return null;
+    const loc = page.locator(q);
+    const n = Math.min(await loc.count().catch(() => 0), 10);
+    for (let i = 0; i < n; i++) if (await loc.nth(i).isVisible().catch(() => false)) return loc.nth(i);
+    return null;
+  };
+  const fail = (why) => {
+    throw new ChatError(`Could not start an incognito / temporary chat on ${provider.name}: ${why}. Nothing was sent. Check it in the account's browser, or adjust "incognito" in Settings → Provider overrides.`, 502, 'incognito_unavailable');
+  };
+  const indicatorOn = async () => !!(inc.indicator && (await visibleOne(inc.indicator)));
+  if (inc.indicator && (await indicatorOn())) return log(account, 'incognito chat');
+
+  let btn = null;
+  if (inc.button) {
+    for (let i = 0; i < 10 && !btn; i++) {
+      btn = await visibleOne(inc.button);
+      if (!btn) await sleep(500);
+    }
+  }
+  if (btn) {
+    if (!(await btn.evaluate(toggleIsOn).catch(() => false))) {
+      await btn.click({ timeout: 5000 }).catch(() => btn.click({ timeout: 3000, force: true }));
+      await sleep(800);
+    }
+    if (inc.indicator) {
+      for (let i = 0; i < 8 && !(await indicatorOn()); i++) await sleep(400);
+      if (!(await indicatorOn())) fail('the mode did not switch on');
+    } else if (!(await btn.evaluate(toggleIsOn).catch(() => false)) && !(inc.url && urlHasMode(page.url(), inc.url))) {
+      fail('the toggle did not switch on');
+    }
+    return log(account, 'incognito chat');
+  }
+  // No toggle: rely on the incognito URL, as long as the site kept us there.
+  if (inc.url && urlHasMode(page.url(), inc.url) && !inc.indicator) return log(account, 'incognito chat (via URL)');
+  if (inc.indicator) fail('its indicator is not shown');
+  fail(inc.button ? 'its button was not found' : 'the site left the incognito page');
+}
+
+/** The incognito URL's query (e.g. ?temporary-chat=true) is still in the current URL. */
+function urlHasMode(current, incognitoUrl) {
+  try {
+    const want = new URL(incognitoUrl);
+    const cur = new URL(current);
+    if (cur.host !== want.host) return false;
+    for (const [k, v] of want.searchParams) if (!cur.searchParams.has(k) || (v && cur.searchParams.get(k) !== v)) return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 /**
  * resume: { url, unique, token } of an existing web chat to continue, or null for a new chat.
  * Returns { text, url, unique, token } — where the chat now lives.
  */
-async function runChat({ browsers, store, account, prompt, model, onDelta, signal, timeoutMs, files = [], resume = null }) {
+async function runChat({ browsers, store, account, prompt, model, onDelta, signal, timeoutMs, files = [], resume = null, incognito = false }) {
   const provider = resolveProvider(store, account);
   let sel = { ...provider.selectors, loggedOutUrl: provider.loggedOutUrl };
   if (!sel.input || !sel.assistant) throw new ChatError('Provider is missing input/assistant selectors', 500, 'config_error');
@@ -114,8 +185,12 @@ async function runChat({ browsers, store, account, prompt, model, onDelta, signa
       log(account, 'continuing in the open chat');
     } else {
       if (resume) throw new ChatError('The earlier web chat is no longer open', 409, 'chat_gone');
+      const inc = provider.incognito || {};
+      if (incognito && !inc.url && !inc.button) {
+        throw new ChatError(`${provider.name} has no incognito / temporary chat mode set up in ai2vpn (Settings → Provider overrides → "incognito").`, 400, 'incognito_unavailable');
+      }
       st.inChat = true;
-      await page.goto(provider.newChatUrl || provider.homeUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.goto((incognito && inc.url) || provider.newChatUrl || provider.homeUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
     }
     st.inChat = true;
 
@@ -142,6 +217,10 @@ async function runChat({ browsers, store, account, prompt, model, onDelta, signa
       return snap;
     };
     let before = await waitForInput();
+    if (incognito && !continuing) {
+      await enableIncognito(page, provider, account);
+      before = (await page.evaluate(pageSnapshot, sel).catch(() => null)) || before;
+    }
 
     if (wantModel) {
       const r = await selectModel(page, provider, wantModel, (m) => log(account, m));

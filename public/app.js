@@ -141,6 +141,7 @@ function statusBadge(a) {
   if (a.lastCheck) out.push(a.lastCheck.loggedIn ? '<span class="badge ok">● logged in</span>' : '<span class="badge bad">● logged out</span>');
   else out.push('<span class="badge">not checked</span>');
   if (a.running) out.push('<span class="badge run">browser running</span>');
+  if (a.incognito) out.push('<span class="badge" title="API chats use the site\'s temporary / incognito mode and are not saved in the account\'s history">🕶 incognito</span>');
   if (a.credentials) out.push(`<span class="badge" title="Saved sign-in for ${esc(a.credentials.email)}${a.credentials.autoRelogin ? ' — signs in again automatically when the session expires' : ''}">🔑 ${a.credentials.autoRelogin ? 'auto re-login' : 'saved login'}</span>`);
   return out.join(' ');
 }
@@ -212,12 +213,15 @@ function openAddAccount() {
     const p = state.providers.find((x) => x.id === chosen);
     const name = $('#acc-name', m.el);
     if (!name.value || name.dataset.auto) { name.value = p.name; name.dataset.auto = '1'; }
+    $('#acc-incognito', m.el).disabled = !p.incognito;
+    if (!p.incognito) $('#acc-incognito', m.el).checked = false;
+    $('#acc-incognito-note', m.el).hidden = !!p.incognito;
   });
   $('#acc-name', m.el).addEventListener('input', (e) => delete e.target.dataset.auto);
   $('#acc-create', m.el).onclick = async () => {
     if (!chosen) return toast('Pick a service', true);
     try {
-      const a = await api('/api/accounts', { body: { provider: chosen, name: $('#acc-name', m.el).value, slug: $('#acc-slug', m.el).value } });
+      const a = await api('/api/accounts', { body: { provider: chosen, name: $('#acc-name', m.el).value, slug: $('#acc-slug', m.el).value, incognito: $('#acc-incognito', m.el).checked } });
       m.close();
       await loadAccounts();
       if (chosen === 'custom') openAdvanced(a); else openLogin(a);
@@ -370,6 +374,7 @@ async function openAdvanced(a) {
     <h3>Account settings — ${esc(a.name)}</h3>
     <div class="row"><label class="grow">Name<input id="ad-name" value="${esc(a.name)}"></label><label class="grow">Model name / slug<input id="ad-slug" value="${esc(a.slug)}"></label></div>
     <label class="check"><input type="checkbox" id="ad-disabled" ${a.disabled ? 'checked' : ''}> Disabled (API rejects requests)</label>
+    <label class="check"><input type="checkbox" id="ad-incognito" ${a.incognito ? 'checked' : ''} ${a.incognitoSupported ? '' : 'disabled'}> Incognito: temporary / private chats, not saved in the account's history${a.incognitoSupported ? '' : ' <span class="muted small">(not available for this service)</span>'}</label>
     <label>Overrides for this account only (JSON — URLs, selectors, stableMs)
       <textarea id="ad-ov" rows="12" spellcheck="false">${esc(JSON.stringify(override, null, 2))}</textarea></label>
     <details><summary class="muted small">Effective provider definition</summary><pre class="code" style="max-height:260px">${esc(JSON.stringify(def, null, 2))}</pre></details>
@@ -379,7 +384,7 @@ async function openAdvanced(a) {
     let ov;
     try { ov = JSON.parse($('#ad-ov', m.el).value || '{}'); } catch (e) { return toast('Invalid JSON: ' + e.message, true); }
     try {
-      await api(`/api/accounts/${a.id}`, { method: 'PATCH', body: { name: $('#ad-name', m.el).value, slug: $('#ad-slug', m.el).value, disabled: $('#ad-disabled', m.el).checked, override: ov } });
+      await api(`/api/accounts/${a.id}`, { method: 'PATCH', body: { name: $('#ad-name', m.el).value, slug: $('#ad-slug', m.el).value, disabled: $('#ad-disabled', m.el).checked, incognito: $('#ad-incognito', m.el).checked, override: ov } });
       toast('Saved'); m.close(); loadAccounts();
     } catch (e) { toast(e.message, true); }
   };

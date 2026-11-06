@@ -21,6 +21,8 @@
 <div id="models">
   <button id="model-btn" aria-haspopup="menu">Fast 1</button>
   <button id="think" aria-pressed="false">Think</button>
+  <button id="incognito-btn" aria-label="Incognito" aria-pressed="false">👻</button>
+  <span id="incognito-on" hidden>Incognito chat — not saved</span>
   <div id="model-menu" hidden>
     <div role="menuitem">Fast 1<br><small>Quick answers</small></div>
     <div role="menuitem">Smart 2<br><small>Best for hard tasks</small></div>
@@ -104,6 +106,12 @@
   // With ?no-url the site keeps one URL for every chat (like a "temporary chat").
   const params = new URLSearchParams(location.search);
   let chatId = params.get('c');
+  // incognito / temporary chat: via ?incognito=1 (like ChatGPT) or the 👻 toggle (like Gemini)
+  let incognito = params.has('incognito');
+  const incBtn = document.getElementById('incognito-btn');
+  const renderInc = () => { document.getElementById('incognito-on').hidden = !incognito; incBtn.setAttribute('aria-pressed', String(incognito)); };
+  incBtn.onclick = () => { incognito = !incognito; renderInc(); };
+  renderInc();
   const saveChat = () => { if (chatId) localStorage.setItem('mockchat:' + chatId, log.innerHTML); };
   if (chatId && localStorage.getItem('mockchat:' + chatId)) log.innerHTML = localStorage.getItem('mockchat:' + chatId);
   const prompt = document.getElementById('prompt');
@@ -114,7 +122,7 @@
     const text = prompt.value.trim();
     if (!text) return;
     prompt.value = '';
-    if (!chatId && !params.has('no-url')) {
+    if (!chatId && !params.has('no-url') && !incognito) {
       chatId = Math.random().toString(36).slice(2, 10);
       params.set('c', chatId);
       history.pushState(null, '', '?' + params.toString());
@@ -140,7 +148,7 @@
     attached.length = 0;
     document.getElementById('atts').innerHTML = '';
     const modelInfo = (document.title === 'WRONG BUTTON' ? ' [clicked the sidebar!]' : '') + ` [model: ${document.getElementById('model-btn').textContent}, think: ${think.getAttribute('aria-pressed') === 'true' ? 'on' : 'off'}]`;
-    const words = ('Hello from the **mock** model. You said: ' + text.slice(0, 2000).replace(/\s+/g, ' ') + fileInfo + modelInfo + ` [turn: ${turn}]`).split(' ');
+    const words = ('Hello from the **mock** model. You said: ' + text.slice(0, 2000).replace(/\s+/g, ' ') + fileInfo + modelInfo + ` [turn: ${turn}] [incognito: ${incognito ? 'on' : 'off'}]`).split(' ');
     let html = '';
     for (const w of words) {
       if (stopped) break;

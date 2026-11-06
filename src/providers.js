@@ -24,6 +24,9 @@
  * loggedOutUrl  (optional) regex; when the page URL matches, you're logged out
  * loginUrl      (optional) where "Direct login" starts (defaults to homeUrl)
  * loginButton   (optional) button that opens the sign-in form from a landing page
+ * incognito     (optional) how to start a chat that isn't saved in the account's history:
+ *               { url: page that opens one, button: toggle to click, indicator: element shown
+ *               only in that mode (used to verify it) }
  * stableMs      how long the reply must stay unchanged to count as finished
  * modelUrl      (optional) URL template used when a request names a model and the model menu
  *               can't be used, e.g. "https://chatgpt.com/?model={model}"
@@ -41,6 +44,7 @@ const BUILTIN = {
     loginButton: 'button[data-testid="login-button"]',
     newChatUrl: 'https://chatgpt.com/',
     modelUrl: 'https://chatgpt.com/?model={model}',
+    incognito: { url: 'https://chatgpt.com/?temporary-chat=true' }, // "Temporary chat"
     selectors: {
       input: '#prompt-textarea',
       send: 'button[data-testid="send-button"], #composer-submit-button',
@@ -63,6 +67,7 @@ const BUILTIN = {
     color: '#d97757',
     homeUrl: 'https://claude.ai/new',
     loginUrl: 'https://claude.ai/login',
+    incognito: { url: 'https://claude.ai/new?incognito', button: 'button[aria-label*="incognito" i]' },
     newChatUrl: 'https://claude.ai/new',
     selectors: {
       input: 'div[contenteditable="true"].ProseMirror, div[contenteditable="true"]',
@@ -87,6 +92,7 @@ const BUILTIN = {
     color: '#4285f4',
     homeUrl: 'https://gemini.google.com/app',
     loginUrl: 'https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fgemini.google.com%2Fapp',
+    incognito: { button: 'button[aria-label*="Temporary chat" i], button:has-text("Temporary chat")' },
     newChatUrl: 'https://gemini.google.com/app',
     selectors: {
       input: 'rich-textarea .ql-editor, div.ql-editor[contenteditable="true"]',
@@ -153,6 +159,7 @@ const BUILTIN = {
     color: '#000000',
     homeUrl: 'https://grok.com/',
     loginUrl: 'https://accounts.x.ai/sign-in?redirect=grok-com',
+    incognito: { button: 'button[aria-label*="Private" i], a[aria-label*="Private" i]' },
     newChatUrl: 'https://grok.com/',
     selectors: {
       input: 'textarea, div[contenteditable="true"]',
@@ -249,7 +256,7 @@ function listProviders(store) {
   if (process.env.ENABLE_MOCK_PROVIDER === '1') ids.add('mock');
   return [...ids].map((id) => {
     const p = id === 'mock' ? mockProvider() : BUILTIN[id] ? mergeProvider(BUILTIN[id], overrides[id]) : { id, ...overrides[id] };
-    return { id, name: p.name || id, color: p.color || '#64748b', homeUrl: p.homeUrl, builtin: !!BUILTIN[id], notes: p.notes || '' };
+    return { id, name: p.name || id, color: p.color || '#64748b', homeUrl: p.homeUrl, builtin: !!BUILTIN[id], notes: p.notes || '', incognito: !!(p.incognito && (p.incognito.url || p.incognito.button)) };
   });
 }
 
@@ -262,6 +269,7 @@ function mockProvider() {
     color: '#a855f7',
     homeUrl: `http://127.0.0.1:${port}/__mock/`,
     loginUrl: `http://127.0.0.1:${port}/__mock/login.html`,
+    incognito: { url: `http://127.0.0.1:${port}/__mock/?incognito=1`, indicator: '#incognito-on' },
     newChatUrl: `http://127.0.0.1:${port}/__mock/`,
     selectors: {
       input: '#prompt',
