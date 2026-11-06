@@ -101,7 +101,10 @@ fi
 # where the installer remembers the install folder (so a custom folder is found next time)
 if [ "$(id -u)" -eq 0 ] || [ -n "$SUDO" ]; then CONF_FILE="/etc/ai2vpn.conf"; else CONF_FILE="$HOME/.config/ai2vpn.conf"; fi
 has_files() { [ -f "$INSTALL_DIR/docker-compose.yml" ]; }
-installed() { has_files && [ -f "$INSTALL_DIR/.env" ]; }   # .env is written by the first install
+# installed = ai2vpn has run here (data/config.json) or this installer set it up (.env).
+# Hand-made installs often have no .env, so data/ counts too.
+is_installed_dir() { [ -f "$1/.env" ] || [ -f "$1/data/config.json" ]; }
+installed() { has_files && is_installed_dir "$INSTALL_DIR"; }
 
 # ---------------------------------------------------------------- docker
 install_docker() {
@@ -190,7 +193,15 @@ compose_file() { local f; f="$(env_get COMPOSE_FILE)"; echo "$INSTALL_DIR/${f:-d
 fixed_port() {  # a port typed straight into docker-compose.yml (instead of ${AI2VPN_PORT})
   sed -n 's/^[[:space:]]*-[[:space:]]*"\{0,1\}\([0-9][0-9]*\):8080"\{0,1\}[[:space:]]*\(#.*\)\{0,1\}$/\1/p' "$(compose_file)" 2>/dev/null | head -1
 }
-current_port() { local p; p="$(fixed_port)"; [ -z "$p" ] && p="$(env_get AI2VPN_PORT)"; echo "${p:-8080}"; }
+published_port() {  # the host port the running ai2vpn container is published on
+  [ -n "$DOCKER" ] || quick_docker 2>/dev/null || return 0
+  $DOCKER port ai2vpn 8080/tcp 2>/dev/null | head -1 | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p'
+}
+current_port() {
+  local p; p="$(fixed_port)"; [ -z "$p" ] && p="$(env_get AI2VPN_PORT)"
+  [ -z "$p" ] && [ ! -f "$INSTALL_DIR/.env" ] && p="$(published_port)"
+  echo "${p:-8080}"
+}
 server_ip() {
   local ip=""
   [ "$OS" = "Linux" ] && ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
@@ -255,7 +266,7 @@ find_installs() {  # prints every ai2vpn folder found, best guess first
     seen="$seen $d"
     is_a2v_dir "$d" || continue
     # real installs (they have a .env) first; plain downloads of the code after them
-    if [ -f "$d/.env" ]; then out="$out$d"$'\n'; else rest="$rest$d"$'\n'; fi
+    if is_installed_dir "$d"; then out="$out$d"$'\n'; else rest="$rest$d"$'\n'; fi
   done
   if [ "${1:-}" = "--all" ]; then printf '%s%s' "$out" "$rest"; else printf '%s' "$out"; fi
 }
@@ -290,7 +301,7 @@ remember_dir() {
 pick_dir() {  # pick_dir "<newline list>"  → sets INSTALL_DIR; returns 1 if cancelled
   local list="$1" n=0 d a
   echo >/dev/tty; printf '  %sai2vpn found in:%s\n' "$B" "$R" >/dev/tty
-  while IFS= read -r d; do [ -z "$d" ] && continue; n=$((n + 1)); printf '  %s%d)%s %s%s\n' "$C$B" "$n" "$R" "$d" "$( [ -f "$d/.env" ] || printf ' %s(downloaded, not installed)%s' "$D" "$R")" >/dev/tty; done <<<"$list"
+  while IFS= read -r d; do [ -z "$d" ] && continue; n=$((n + 1)); printf '  %s%d)%s %s%s\n' "$C$B" "$n" "$R" "$d" "$(is_installed_dir "$d" || printf ' %s(downloaded, not installed)%s' "$D" "$R")" >/dev/tty; done <<<"$list"
   [ "$n" -eq 0 ] && printf '  %s(none in the usual places)%s\n' "$D" "$R" >/dev/tty
   printf '  %sS)%s Search the whole disk\n  %sT)%s Type a folder\n  %s0)%s Cancel\n' "$C$B" "$R" "$C$B" "$R" "$C$B" "$R" >/dev/tty
   a="$(ask "  Choose" "$( [ "$n" -gt 0 ] && echo 1 || echo S)")"
@@ -311,7 +322,7 @@ resolve_dir() {
   local found n; found="$(find_installs)"; n="$(grep -c . <<<"$found" || true)"
   if [ "${n:-0}" -eq 0 ] && [ "${A2V_NO_SEARCH:-0}" != 1 ]; then
     # nothing in the usual places: search the disk for a custom folder (only real installs count)
-    found="$(quick_search | while IFS= read -r d; do if [ -f "$d/.env" ]; then (cd "$d" && pwd -P); fi; done | awk '!seen[$0]++' || true)"
+    found="$(quick_search | while IFS= read -r d; do if is_installed_dir "$d"; then (cd "$d" && pwd -P); fi; done | awk '!seen[$0]++' || true)"
     n="$(grep -c . <<<"$found" || true)"
   fi
   if [ "${n:-0}" -eq 0 ]; then INSTALL_DIR="$DEFAULT_DIR"; return 0; fi
@@ -454,12 +465,21 @@ summary() {
   printf '%s┌──────────────────────────────────────────────────────────%s\n' "$G" "$R"
   printf '%s│%s  %sai2vpn is ready%s\n' "$G" "$R" "$B" "$R"
   printf '%s│%s  Open:        %s%s%s\n' "$G" "$R" "$B" "$(address)" "$R"
-  printf '%s│%s  Password:    %s%s%s\n' "$G" "$R" "$B$Y" "${pw:-(see: docker logs ai2vpn)}" "$R"
+  printf '%s│%s  Password:    %s%s%s\n' "$G" "$R" "$B$Y" "${pw:-unchanged (the one you already use; change it in menu 3 → 2)}" "$R"
   printf '%s│%s  API base:    %s/v1\n' "$G" "$R" "$(address)"
   if sandbox_on; then printf '%s│%s  Sandbox:     web UI → Sandbox (Claude Code, Codex, Gemini CLI)\n' "$G" "$R"; fi
   printf '%s│%s  VPN:         %s\n' "$G" "$R" "$( [ "$(vpn_mode)" = gluetun ] && echo "gluetun ($(env_get VPN_SERVICE_PROVIDER))" || echo "web UI → VPN tab, or menu 3 → 4")"
   printf '%s│%s  Folder:      %s\n' "$G" "$R" "$INSTALL_DIR"
   printf '%s└──────────────────────────────────────────────────────────%s\n' "$G" "$R"
+}
+
+adopt_existing() {  # an install made by hand (no .env): write down what is running now, change nothing
+  local p; p="$(fixed_port)"; [ -z "$p" ] && p="$(env_get AI2VPN_PORT)"; [ -z "$p" ] && p="$(published_port)"; p="${p:-8080}"
+  info "Existing ai2vpn found (set up without this installer). Keeping it as it is:"
+  [ -z "$(env_get AI2VPN_PORT)" ] && env_set AI2VPN_PORT "$p"
+  [ -z "$(env_get A2V_SANDBOX)" ] && env_set A2V_SANDBOX 1
+  [ -z "$(env_get TZ)" ] && env_set TZ "$( (cat /etc/timezone 2>/dev/null || timedatectl show -p Timezone --value 2>/dev/null || echo UTC) | head -1)"
+  ok "Port $p and your accounts are kept; the admin password is unchanged (change it in menu 3 → 2)."
 }
 
 first_setup() {  # questions asked only on the very first install (later: Settings menu)
@@ -512,12 +532,16 @@ do_install() {
 
   fetch_code
   cd "$INSTALL_DIR"
-  if [ ! -f .env ]; then
-    first_setup
-  elif [ -n "$PORT" ]; then
+  local fresh=0
+  if [ ! -f .env ] && [ ! -f data/config.json ]; then
+    first_setup; fresh=1
+  elif [ ! -f .env ] || [ -z "$(env_get AI2VPN_PORT)" ] || [ -z "$(env_get A2V_SANDBOX)" ]; then
+    adopt_existing
+  fi
+  if [ -n "$PORT" ]; then
     valid_port "$PORT" || die "Not a valid port: $PORT"
     env_set AI2VPN_PORT "$PORT"; ok "Port changed to $PORT"
-  else
+  elif [ "$fresh" -eq 0 ]; then
     info "Keeping your settings (port $(current_port), VPN: $(vpn_mode), sandbox: $(sandbox_on && echo on || echo off))"
   fi
   $SUDO mkdir -p data workspace sandbox-home
@@ -548,6 +572,7 @@ do_status() {
 }
 do_vpn_status() {
   need_install
+  if [ -z "$(env_get ADMIN_PASSWORD)" ]; then printf 'VPN:      %s(see the web UI → VPN; set a password in menu 3 → 2 to show it here)%s\n' "$D" "$R"; return 0; fi
   local j; j="$(a2v_api GET /api/vpn 2>/dev/null)" || { printf 'VPN:      %s(ai2vpn is not running)%s\n' "$D" "$R"; return 0; }
   printf 'VPN:      %s · %s\n' "$(json_field "$j" 'd.status.mode+" · "+d.status.status+(d.status.error?" ("+d.status.error+")":"")')" \
     "exit IP $(json_field "$j" '(d.status.ip&&d.status.ip.ip?d.status.ip.ip+" "+(d.status.ip.country||"")+" "+(d.status.ip.org||""):"unknown")')"
@@ -626,6 +651,7 @@ ask_gluetun() {
 do_vpn_file() {  # load a WireGuard .conf / OpenVPN .ovpn into the built-in VPN and connect
   need_install
   [ "$(vpn_mode)" = built-in ] || die "This is for the built-in VPN; you use gluetun (switch in menu 3 → 4 → 4)."
+  [ -n "$(env_get ADMIN_PASSWORD)" ] || die "The installer needs the admin password to do this. Set one in menu 3 → 2, or load the file in the web UI → VPN."
   local f mode body u="" pw="" ks j
   f="$(ask "Path to your WireGuard .conf or OpenVPN .ovpn file" "")"; f="${f/#\~/$HOME}"
   [ -z "$f" ] && { info "Cancelled."; return 0; }
