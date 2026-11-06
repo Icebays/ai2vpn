@@ -28,6 +28,7 @@
  * modelUrl      (optional) URL template used when a request names a model and the model menu
  *               can't be used, e.g. "https://chatgpt.com/?model={model}"
  * Model menu fields (selectors.modelButton / modelOption, moreModels, modelToggles,
+ * staticModels — when modelButton finds nothing, the button is located automatically;
  * staticModels) are documented in src/models.js.
  */
 const BUILTIN = {
@@ -75,7 +76,7 @@ const BUILTIN = {
       fileInput: 'input[type="file"][data-testid="file-upload"], input[type="file"]',
       attach: 'button[aria-label*="Add files" i], button[aria-label*="Attach" i], button[data-testid="input-menu-plus"]',
       attachMenu: '[role="menuitem"]:has-text("Upload a file"), [role="menuitem"]:has-text("Add files")',
-      modelButton: 'button[data-testid="model-selector-dropdown"], button[aria-haspopup][aria-label*="model" i]',
+      modelButton: 'button[data-testid="model-selector-dropdown"]',
     },
     loggedOutUrl: '/login',
     stableMs: 1500,
@@ -98,7 +99,7 @@ const BUILTIN = {
       attach: 'button[aria-label*="upload file menu" i], button[aria-label*="Add files" i], button.upload-card-button',
       attachMenu: 'button[data-test-id="local-images-files-uploader-button"], [role="menuitem"]:has-text("Upload files")',
       uploading: 'mat-progress-spinner, .loading-spinner, [role="progressbar"]',
-      modelButton: 'button[data-test-id="bard-mode-menu-button"], button.gds-mode-switch-button, button[aria-haspopup][aria-label*="mode" i]',
+      modelButton: 'button[data-test-id="bard-mode-menu-button"], button.gds-mode-switch-button',
       modelOption: '[role="menuitem"], [role="menuitemradio"], button.mat-mdc-menu-item',
     },
     loggedOutUrl: 'accounts\\.google\\.com',
@@ -180,7 +181,7 @@ const BUILTIN = {
       content: '.markdown-content-container, .markdown-prose, .markdown',
       exclude: 'button, .thinking-block, [class*="think"]',
       loggedOut: 'button.login-button, a[href*="/auth"]',
-      modelButton: '#model-selector-0-button, button[aria-haspopup][aria-label*="model" i]',
+      modelButton: '#model-selector-0-button',
     },
     stableMs: 2500,
   },

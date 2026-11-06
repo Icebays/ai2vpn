@@ -37,7 +37,10 @@ COPY tmux.conf /etc/tmux.conf
 COPY bashrc /etc/skel-coder/.bashrc
 COPY update-clis /usr/local/bin/update-clis
 COPY entrypoint.sh /usr/local/bin/sandbox-entrypoint
-RUN chmod +x /usr/local/bin/update-clis /usr/local/bin/sandbox-entrypoint
+# Set permissions explicitly: COPY keeps the host's file modes, and on some NAS / shared volumes the
+# checked-out files are readable by their owner only, which locked "coder" out (e.g. /etc/tmux.conf).
+RUN chmod 644 /etc/tmux.conf /etc/skel-coder/.bashrc \
+ && chmod 755 /etc/skel-coder /usr/local/bin/update-clis /usr/local/bin/sandbox-entrypoint
 
 ENV LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \

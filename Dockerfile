@@ -18,7 +18,8 @@ COPY src ./src
 COPY public ./public
 COPY scripts ./scripts
 COPY test ./test
-RUN chmod +x scripts/*.sh
+# COPY keeps the host's file modes (owner-only on some NAS volumes): normalise them
+RUN chmod -R u=rwX,go=rX /app/src /app/public /app/scripts /app/test && chmod 755 scripts/*.sh
 
 ENV NODE_ENV=production \
     PORT=8080 \

@@ -63,6 +63,64 @@ async function firstVisible(page, selector) {
   return null;
 }
 
+/**
+ * Find the model button. Tries the configured selector first, then looks for a menu button near
+ * the prompt box whose text looks like a model name. Buttons in the sidebar / navigation are never
+ * used: chat titles there can contain words like "model" (e.g. "More options for <chat title>").
+ */
+async function findModelButton(page, sel) {
+  const found = await page
+    .evaluate(({ configured, input }) => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const st = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
+      };
+      const inSidebar = (el) => !!el.closest('nav, aside, [role="navigation"], [data-testid*="sidebar" i], [class*="sidebar" i]');
+      document.querySelectorAll('[data-a2v-model-btn]').forEach((e) => e.removeAttribute('data-a2v-model-btn'));
+      const all = (q) => {
+        try {
+          return q ? [...document.querySelectorAll(q)] : [];
+        } catch (e) {
+          return [];
+        }
+      };
+      let pick = all(configured).find((e) => visible(e) && !inSidebar(e));
+      if (!pick) {
+        const MODEL = /\b(opus|sonnet|haiku|claude|gpt|chatgpt|o[1-9]|gemini|flash|pro|ultra|thinking|reasoning|deepseek|kimi|k[0-9]|grok|qwen|mistral|large|medium|auto|fast|instant|expert|model)\b/i;
+        const box = all(input).find(visible);
+        const anchor = box ? box.getBoundingClientRect() : null;
+        const cands = all('button[aria-haspopup], [role="button"][aria-haspopup], button[aria-expanded], [role="combobox"]')
+          .filter((e) => visible(e) && !inSidebar(e) && !e.closest('a'))
+          .filter((e) => {
+            const text = (e.innerText || '').trim();
+            const label = e.getAttribute('aria-label') || '';
+            if (/more options|options for|share|account|profile|settings/i.test(label)) return false;
+            return (text && text.length <= 40 && MODEL.test(text)) || /^(model|mode)( selector| switcher| menu)?$/i.test(label.trim());
+          });
+        const dist = (e) => {
+          if (!anchor) return 0;
+          const r = e.getBoundingClientRect();
+          return Math.hypot(r.x + r.width / 2 - (anchor.x + anchor.width / 2), r.y + r.height / 2 - (anchor.y + anchor.height / 2));
+        };
+        cands.sort((a, b) => dist(a) - dist(b));
+        pick = cands[0];
+      }
+      if (pick) pick.setAttribute('data-a2v-model-btn', '1');
+      return !!pick;
+    }, { configured: sel.modelButton || '', input: sel.input || '' })
+    .catch(() => false);
+  return found ? page.locator('[data-a2v-model-btn]').first() : null;
+}
+
+async function clickHard(loc) {
+  try {
+    await loc.click({ timeout: 4000 });
+  } catch (e) {
+    await loc.click({ timeout: 3000, force: true }); // something overlaps it (tooltip, banner…)
+  }
+}
+
 async function visibleOptions(page, optionSel) {
   const loc = page.locator(optionSel).filter({ visible: true });
   const n = Math.min(await loc.count().catch(() => 0), 60);
@@ -96,9 +154,9 @@ function pickBest(model, options) {
 
 /** Open the menu and collect options, expanding "More models"-style submenus once. */
 async function collectOptions(page, sel, provider, { want } = {}) {
-  const btn = await firstVisible(page, sel.modelButton);
+  const btn = await findModelButton(page, sel);
   if (!btn) return null;
-  await btn.click({ timeout: 5000 });
+  await clickHard(btn);
   await sleep(500);
   const optionSel = sel.modelOption || DEFAULT_OPTION;
   let options = await visibleOptions(page, optionSel);
@@ -151,15 +209,15 @@ async function applyToggles(page, provider, model, log) {
 async function selectModel(page, provider, model, log = () => {}) {
   const sel = provider.selectors || {};
   const toggles = (provider.modelToggles || []).length;
-  if (!sel.modelButton && !toggles) return null;
+  // (no configured modelButton: findModelButton still looks for one)
   let result = { changed: false, label: '' };
   // Words that drive a toggle (e.g. "think") are not part of the menu entry's name.
   const menuModel = toggles
     ? words(model).filter((w) => !provider.modelToggles.some((t) => new RegExp(t.match, 'i').test(w))).join(' ')
     : model;
 
-  if (sel.modelButton && modelTokens(menuModel).length) {
-    const btn = await firstVisible(page, sel.modelButton);
+  if (modelTokens(menuModel).length) {
+    const btn = await findModelButton(page, sel);
     if (!btn) {
       if (!toggles) return null;
     } else {
@@ -179,7 +237,7 @@ async function selectModel(page, provider, model, log = () => {}) {
             );
           }
         } else {
-          await choice.loc.click({ timeout: 5000 });
+          await clickHard(choice.loc);
           await sleep(600);
           // Some menus stay open after choosing; close them.
           if ((await page.locator(sel.modelOption || DEFAULT_OPTION).filter({ visible: true }).count().catch(() => 0)) > 0) await closeMenu(page);
@@ -200,7 +258,7 @@ async function selectModel(page, provider, model, log = () => {}) {
 async function discoverModels(page, provider) {
   const sel = provider.selectors || {};
   const labels = [];
-  if (sel.modelButton) {
+  {
     const got = await collectOptions(page, sel, provider, {});
     if (got) {
       for (const o of got.options) if (!isExpander(provider, o.label)) labels.push(o.label);

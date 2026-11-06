@@ -169,6 +169,17 @@ async function main() {
     assert.ok(mr.json.error.message.includes('Fast 1 | Smart 2'), mr.json.error.message);
     step('model menu: pick, submenu, toggle, default, unknown model → 400 with list');
 
+    // the sidebar decoy must never be used, whatever the configured selector says
+    for (const modelButton of ['button[aria-haspopup][aria-label*="model" i]', '']) {
+      await req('PATCH', `/api/accounts/${acc.id}`, { override: { selectors: { modelButton } } });
+      mr = await ask('smart 2');
+      assert.equal(mr.status, 200, mr.text);
+      const t = mr.json.choices[0].message.content;
+      assert.ok(t.includes('[model: Smart 2,') && !t.includes('clicked the sidebar'), `modelButton=${JSON.stringify(modelButton)}: ${t}`);
+    }
+    await req('PATCH', `/api/accounts/${acc.id}`, { override: null });
+    step('model button found near the prompt box; sidebar chat menus ignored');
+
     const disc = await req('POST', `/api/accounts/${acc.id}/models`, {});
     assert.deepEqual(disc.json.models.map((m) => m.label), ['Fast 1', 'Smart 2', 'Legacy 0.9'], disc.text);
     const ml = await req('GET', '/v1/models', null, { authorization: `Bearer ${acc.apiKey}` });

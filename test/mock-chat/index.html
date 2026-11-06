@@ -12,6 +12,11 @@
 </style>
 </head>
 <body>
+<nav id="sidebar">
+  <!-- decoy like claude.ai's chat list: a chat titled with the word "model" and its options menu -->
+  <a href="#chat-1">Greeting and model identity
+    <button aria-haspopup="menu" aria-label="More options for Greeting and model identity" onclick="event.preventDefault(); document.title = 'WRONG BUTTON';">⋯</button></a>
+</nav>
 <h1>Mock Chat</h1>
 <div id="models">
   <button id="model-btn" aria-haspopup="menu">Fast 1</button>
@@ -134,7 +139,7 @@
     const fileInfo = attached.length ? ' Files: ' + attached.map(f => `${f.name}[${f.size}b${f.text ? ':' + f.text.replace(/\s+/g, '_') : ''}]`).join(',') : '';
     attached.length = 0;
     document.getElementById('atts').innerHTML = '';
-    const modelInfo = ` [model: ${document.getElementById('model-btn').textContent}, think: ${think.getAttribute('aria-pressed') === 'true' ? 'on' : 'off'}]`;
+    const modelInfo = (document.title === 'WRONG BUTTON' ? ' [clicked the sidebar!]' : '') + ` [model: ${document.getElementById('model-btn').textContent}, think: ${think.getAttribute('aria-pressed') === 'true' ? 'on' : 'off'}]`;
     const words = ('Hello from the **mock** model. You said: ' + text.slice(0, 2000).replace(/\s+/g, ' ') + fileInfo + modelInfo + ` [turn: ${turn}]`).split(' ');
     let html = '';
     for (const w of words) {
