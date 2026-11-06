@@ -16,7 +16,7 @@ services:
       TZ: ${TZ:-UTC}
       # VPN_MODE: external                     # set when the network is handled by gluetun / the host
     volumes:
-      - ./data:/data                           # accounts, browser profiles (logins), VPN config
+      - ${A2V_DATA_DIR:-./data}:/data          # accounts, browser profiles (logins), VPN config
       - sandbox-run:/run/sandbox               # private socket to the sandbox's web terminal
     cap_add:
       - NET_ADMIN                              # needed to bring up the VPN + kill switch

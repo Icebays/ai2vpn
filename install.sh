@@ -101,9 +101,32 @@ fi
 # where the installer remembers the install folder (so a custom folder is found next time)
 if [ "$(id -u)" -eq 0 ] || [ -n "$SUDO" ]; then CONF_FILE="/etc/ai2vpn.conf"; else CONF_FILE="$HOME/.config/ai2vpn.conf"; fi
 has_files() { [ -f "$INSTALL_DIR/docker-compose.yml" ]; }
-# installed = ai2vpn has run here (data/config.json) or this installer set it up (.env).
-# Hand-made installs often have no .env, so data/ counts too.
-is_installed_dir() { [ -f "$1/.env" ] || [ -f "$1/data/config.json" ]; }
+# installed = this installer set it up (.env) or ai2vpn has run here (data/ — not part of the download,
+# created on the first start). Only the folder itself is checked: ai2vpn runs as root and keeps data/
+# private, so a normal user may not be allowed to look inside it.
+is_installed_dir() {
+  [ -f "$1/.env" ] || [ -d "$1/data" ] && return 0
+  # or Docker says the ai2vpn containers belong to this folder
+  local d; d="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
+  grep -qxF "$d" <<<"$(docker_dirs)"
+}
+DOCKER_DIRS_DONE=0; DOCKER_DIRS=""
+docker_dirs() {  # folders the existing ai2vpn containers belong to (asked once per run)
+  if [ "$DOCKER_DIRS_DONE" -eq 0 ]; then
+    DOCKER_DIRS_DONE=1
+    if quick_docker; then
+      DOCKER_DIRS="$( {
+        for c in $( { $DOCKER ps -aq --filter name=ai2vpn; $DOCKER ps -aq --filter ancestor=ai2vpn:latest; $DOCKER ps -aq --filter label=com.docker.compose.project=ai2vpn; } 2>/dev/null | sort -u); do
+          # the compose folder it was started from …
+          $DOCKER inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$c" 2>/dev/null
+          # … and the folder that holds its data (the parent of what is mounted at /data)
+          $DOCKER inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' "$c" 2>/dev/null | while IFS= read -r m; do [ -n "$m" ] && dirname "$m"; done
+        done
+      } | grep . | while IFS= read -r d; do (cd "$d" 2>/dev/null && pwd -P) || echo "$d"; done | sort -u || true )"
+    fi
+  fi
+  printf '%s' "$DOCKER_DIRS"
+}
 installed() { has_files && is_installed_dir "$INSTALL_DIR"; }
 
 # ---------------------------------------------------------------- docker
@@ -191,11 +214,11 @@ free_port() { local p="${1:-8080}"; while port_busy "$p"; do p=$((p + 1)); done;
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 compose_file() { local f; f="$(env_get COMPOSE_FILE)"; echo "$INSTALL_DIR/${f:-docker-compose.yml}"; }
 fixed_port() {  # a port typed straight into docker-compose.yml (instead of ${AI2VPN_PORT})
-  sed -n 's/^[[:space:]]*-[[:space:]]*"\{0,1\}\([0-9][0-9]*\):8080"\{0,1\}[[:space:]]*\(#.*\)\{0,1\}$/\1/p' "$(compose_file)" 2>/dev/null | head -1
+  sed -n 's/^[[:space:]]*-[[:space:]]*"\{0,1\}\([0-9][0-9]*\):8080"\{0,1\}[[:space:]]*\(#.*\)\{0,1\}$/\1/p' "$(compose_file)" 2>/dev/null | head -1 || true
 }
 published_port() {  # the host port the running ai2vpn container is published on
   [ -n "$DOCKER" ] || quick_docker 2>/dev/null || return 0
-  $DOCKER port ai2vpn 8080/tcp 2>/dev/null | head -1 | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p'
+  $DOCKER port ai2vpn 8080/tcp 2>/dev/null | head -1 | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' || true
 }
 current_port() {
   local p; p="$(fixed_port)"; [ -z "$p" ] && p="$(env_get AI2VPN_PORT)"
@@ -244,10 +267,8 @@ find_installs() {  # prints every ai2vpn folder found, best guess first
   # ask Docker: works for any custom or renamed folder, even manual installs and stopped stacks
   if quick_docker; then
     while IFS= read -r d; do [ -n "$d" ] && c+=("$d"); done < <( {
-        # folders the ai2vpn containers were started from (by project, container name or image)
-        for flt in label=com.docker.compose.project=ai2vpn name=ai2vpn ancestor=ai2vpn:latest ancestor=ai2vpn-sandbox:latest; do
-          $DOCKER ps -a --filter "$flt" --format '{{.Label "com.docker.compose.project.working_dir"}}'
-        done
+        # folders the ai2vpn containers were started from, and where their data is
+        docker_dirs; echo
         # every compose project Docker knows about (also stopped ones) → the folder of its compose file
         $COMPOSE ls --all --format json 2>/dev/null | grep -o '"ConfigFiles":"[^"]*"' | sed 's/^"ConfigFiles":"//; s/"$//' \
           | tr ',' '\n' | while IFS= read -r f; do [ -n "$f" ] && dirname "$f"; done
@@ -325,7 +346,12 @@ resolve_dir() {
     found="$(quick_search | while IFS= read -r d; do if is_installed_dir "$d"; then (cd "$d" && pwd -P); fi; done | awk '!seen[$0]++' || true)"
     n="$(grep -c . <<<"$found" || true)"
   fi
-  if [ "${n:-0}" -eq 0 ]; then INSTALL_DIR="$DEFAULT_DIR"; return 0; fi
+  if [ "${n:-0}" -eq 0 ]; then
+    INSTALL_DIR="$DEFAULT_DIR"
+    local dd; dd="$(docker_dirs)"
+    [ -n "$dd" ] && warn "ai2vpn containers exist (data in: $(tr '\n' ' ' <<<"$dd")) but that folder has no ai2vpn files (docker-compose.yml). Use menu 6 → T to choose the folder with the files, or install there."
+    return 0
+  fi
   if [ "$n" -ge 1 ] && [ -z "$(find_installs)" ]; then tty_info "Found ai2vpn in $(head -1 <<<"$found")"; fi
   if [ "$n" -eq 1 ] || [ "$TTY" -eq 0 ] || [ "$YES" -eq 1 ]; then
     INSTALL_DIR="$(head -1 <<<"$found")"; [ "$n" -gt 1 ] && warn "Several installs found; using $INSTALL_DIR (choose another with --dir)."
@@ -438,7 +464,30 @@ install_shortcut() {
     && $SUDO chmod +x "$bin" 2>/dev/null && ok "Shortcut added: type ${B}ai2vpn${R} to open this menu again." || true
 }
 
+data_dir() {  # where this install keeps its accounts, logins and settings
+  local d; d="$(env_get A2V_DATA_DIR)"
+  case "$d" in "") echo "$INSTALL_DIR/data" ;; /*) echo "$d" ;; *) echo "$INSTALL_DIR/${d#./}" ;; esac
+}
+container_data_dir() {  # the folder an existing "ai2vpn" container has mounted at /data
+  [ -n "$DOCKER" ] || quick_docker 2>/dev/null || return 0
+  $DOCKER inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' ai2vpn 2>/dev/null || true
+}
+replace_foreign_containers() {  # old ai2vpn containers started another way would block the names
+  local n wd want; want="$(cd "$INSTALL_DIR" && pwd -P)"
+  for n in ai2vpn ai2vpn-sandbox; do
+    $DOCKER inspect "$n" >/dev/null 2>&1 || continue
+    wd="$($DOCKER inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$n" 2>/dev/null || true)"
+    [ -n "$wd" ] && [ "$(cd "$wd" 2>/dev/null && pwd -P || echo "$wd")" = "$want" ] && continue
+    if [ "$n" = ai2vpn ] && [ "$(container_data_dir)" != "$(data_dir)" ]; then
+      die "An older ai2vpn container uses other data ($(container_data_dir)). Use menu 1 (Update) to switch to it, or stop that container first."
+    fi
+    info "Replacing the old $n container (started from ${wd:-outside this folder}); your data is kept."
+    $DOCKER rm -f "$n" >/dev/null
+  done
+}
+
 compose_up() {  # start what's enabled (the sandbox can be switched off)
+  replace_foreign_containers
   local svc=() build=(--build)
   [ -n "${A2V_NO_BUILD:-}" ] && build=(--no-build)
   if ! sandbox_on; then svc=(ai2vpn); [ "$(vpn_mode)" = gluetun ] && svc=(gluetun ai2vpn); fi
@@ -476,10 +525,16 @@ summary() {
 adopt_existing() {  # an install made by hand (no .env): write down what is running now, change nothing
   local p; p="$(fixed_port)"; [ -z "$p" ] && p="$(env_get AI2VPN_PORT)"; [ -z "$p" ] && p="$(published_port)"; p="${p:-8080}"
   info "Existing ai2vpn found (set up without this installer). Keeping it as it is:"
+  # settings the old container was started with (docker run -e … / compose environment)
+  local k v cenv; cenv="$($DOCKER inspect -f '{{range .Config.Env}}{{println .}}{{end}}' ai2vpn 2>/dev/null || true)"
+  for k in ADMIN_PASSWORD PUBLIC_URL TZ; do
+    v="$(sed -n "s/^$k=//p" <<<"$cenv" | head -1)"
+    if [ -n "$v" ] && [ -z "$(env_get "$k")" ]; then env_set "$k" "$v"; fi
+  done
   [ -z "$(env_get AI2VPN_PORT)" ] && env_set AI2VPN_PORT "$p"
   [ -z "$(env_get A2V_SANDBOX)" ] && env_set A2V_SANDBOX 1
   [ -z "$(env_get TZ)" ] && env_set TZ "$( (cat /etc/timezone 2>/dev/null || timedatectl show -p Timezone --value 2>/dev/null || echo UTC) | head -1)"
-  ok "Port $p and your accounts are kept; the admin password is unchanged (change it in menu 3 → 2)."
+  ok "Port $(env_get AI2VPN_PORT) and your accounts are kept; the admin password is unchanged (change it in menu 3 → 2)."
 }
 
 first_setup() {  # questions asked only on the very first install (later: Settings menu)
@@ -532,8 +587,21 @@ do_install() {
 
   fetch_code
   cd "$INSTALL_DIR"
-  local fresh=0
-  if [ ! -f .env ] && [ ! -f data/config.json ]; then
+  local fresh=0 old
+  old="$(container_data_dir)"
+  # the running ai2vpn container keeps its data somewhere else: offer to keep using that data
+  if [ -n "$old" ] && [ "$old" != "$(data_dir)" ]; then
+    if [ ! -f "$(data_dir)/config.json" ]; then
+      if confirm "Found your existing ai2vpn data in $old (accounts, browser logins, VPN). Keep using it?" y; then env_set A2V_DATA_DIR "$old"; fi
+    else
+      echo
+      printf '  %sTwo sets of ai2vpn data were found:%s\n' "$B" "$R"
+      item 1 "$old   ${D}(used by the running ai2vpn — recommended)${R}"
+      item 2 "$(data_dir)   ${D}(in this folder)${R}"
+      if [ "$(ask "  Which one should ai2vpn use?" 1)" != 2 ]; then env_set A2V_DATA_DIR "$old"; fi
+    fi
+  fi
+  if [ ! -f .env ] && [ ! -d data ] && [ -z "$(env_get A2V_DATA_DIR)" ]; then
     first_setup; fresh=1
   elif [ ! -f .env ] || [ -z "$(env_get AI2VPN_PORT)" ] || [ -z "$(env_get A2V_SANDBOX)" ]; then
     adopt_existing
@@ -544,7 +612,7 @@ do_install() {
   elif [ "$fresh" -eq 0 ]; then
     info "Keeping your settings (port $(current_port), VPN: $(vpn_mode), sandbox: $(sandbox_on && echo on || echo off))"
   fi
-  $SUDO mkdir -p data workspace sandbox-home
+  $SUDO mkdir -p "$(data_dir)" workspace sandbox-home
   info "Building and starting (the first time downloads ~2 GB and takes 5–15 minutes)…"
   compose_up
   wait_for_app
@@ -563,7 +631,7 @@ do_status() {
   echo
   printf 'Address:  %s\n' "$(address)"
   printf 'Folder:   %s\n' "$INSTALL_DIR"
-  printf 'Data:     %s/data (%s)\n' "$INSTALL_DIR" "$($SUDO du -sh "$INSTALL_DIR/data" 2>/dev/null | awk '{print $1}' || echo '?')"
+  printf 'Data:     %s (%s)\n' "$(data_dir)" "$($SUDO du -sh "$(data_dir)" 2>/dev/null | awk '{print $1}' || echo '?')"
   printf 'Sandbox:  %s\n' "$(sandbox_on && echo on || echo off)"
   if [ -d "$INSTALL_DIR/.git" ]; then printf 'Version:  %s\n' "$($SUDO git -C "$INSTALL_DIR" log -1 --format='%h %cd' --date=short 2>/dev/null || echo '?')"; fi
   if [ -n "$(fixed_port)" ]; then warn "The port is written directly in docker-compose.yml. Menu 3 → 1 can move it to .env."; fi
@@ -697,14 +765,15 @@ do_sandbox_toggle() {
 }
 do_backup() {
   need_install
-  local dir="$INSTALL_DIR/backups" ts file items=(data .env)
+  local dir="$INSTALL_DIR/backups" ts file items=(.env) dd; dd="$(data_dir)"
   ts="$(date +%Y%m%d-%H%M%S)"; file="$dir/ai2vpn-$ts.tar.gz"
   [ -d "$INSTALL_DIR/sandbox-home" ] && items+=(sandbox-home)
   if [ -d "$INSTALL_DIR/workspace" ] && [ -n "$(ls -A "$INSTALL_DIR/workspace" 2>/dev/null)" ] && confirm "Include your sandbox projects (workspace/)?" n; then items+=(workspace); fi
   $SUDO mkdir -p "$dir"
   info "Stopping ai2vpn for a consistent copy (browser profiles are in use while it runs)…"
   $COMPOSE stop >/dev/null 2>&1 || true
-  if $SUDO tar -czf "$file" -C "$INSTALL_DIR" "${items[@]}"; then
+  # data may live outside the install folder: store it as data/ in the archive
+  if $SUDO tar -czf "$file" -C "$(dirname "$dd")" --transform "s|^$(basename "$dd")|data|" "$(basename "$dd")" -C "$INSTALL_DIR" "${items[@]}"; then
     compose_up >/dev/null 2>&1 || true
     $SUDO chmod 600 "$file"
     ok "Backup saved: $file ($($SUDO du -h "$file" | awk '{print $1}'))"
@@ -738,21 +807,36 @@ do_restore() {
   [ -f "$file" ] || die "File not found: $file"
   warn "Restoring replaces the current accounts, logins and settings with the ones in the backup."
   confirm "Restore $(basename "$file")?" n || { info "Cancelled."; return 0; }
-  local ts d; ts="$(date +%Y%m%d-%H%M%S)"
+  local ts tmp dd keep; ts="$(date +%Y%m%d-%H%M%S)"; dd="$(data_dir)"; keep="$(env_get A2V_DATA_DIR)"
+  tmp="$INSTALL_DIR/.restore-$ts"; $SUDO mkdir -p "$tmp"
+  $SUDO tar -xzf "$file" -C "$tmp" || { $SUDO rm -rf "$tmp"; die "Could not read $file"; }
   $COMPOSE stop >/dev/null 2>&1 || true
-  for d in data sandbox-home; do if [ -d "$INSTALL_DIR/$d" ]; then $SUDO mv "$INSTALL_DIR/$d" "$INSTALL_DIR/$d.before-restore-$ts"; fi; done
-  if [ -f "$INSTALL_DIR/.env" ]; then $SUDO cp "$INSTALL_DIR/.env" "$INSTALL_DIR/.env.before-restore-$ts"; fi
-  $SUDO tar -xzf "$file" -C "$INSTALL_DIR"
+  if [ -d "$tmp/data" ]; then
+    [ -d "$dd" ] && $SUDO mv "$dd" "$dd.before-restore-$ts"
+    $SUDO mv "$tmp/data" "$dd"
+  fi
+  if [ -d "$tmp/sandbox-home" ]; then
+    [ -d "$INSTALL_DIR/sandbox-home" ] && $SUDO mv "$INSTALL_DIR/sandbox-home" "$INSTALL_DIR/sandbox-home.before-restore-$ts"
+    $SUDO mv "$tmp/sandbox-home" "$INSTALL_DIR/sandbox-home"
+  fi
+  if [ -f "$tmp/.env" ]; then
+    [ -f "$INSTALL_DIR/.env" ] && $SUDO cp "$INSTALL_DIR/.env" "$INSTALL_DIR/.env.before-restore-$ts"
+    $SUDO cp "$tmp/.env" "$INSTALL_DIR/.env"
+    [ -n "$keep" ] && env_set A2V_DATA_DIR "$keep"   # the data stays where it is on this machine
+  fi
+  $SUDO rm -rf "$tmp"
   compose_up
   ok "Restored. The previous data was kept as *.before-restore-$ts (delete it when you're happy)."
 }
 do_uninstall() {
   need_install
   if [ "$PURGE" -eq 1 ]; then
-    warn "This deletes ALL accounts, browser logins, VPN settings and sandbox logins in $INSTALL_DIR."
+    local dd; dd="$(data_dir)"
+    case "$dd" in /|/bin*|/etc*|/usr|/usr/*|/var|/home|/root|"$HOME") die "Refusing to delete $dd" ;; esac
+    warn "This deletes ALL accounts, browser logins, VPN settings ($dd) and sandbox logins ($INSTALL_DIR/sandbox-home)."
     confirm "Really delete everything?" n || { info "Cancelled."; return 0; }
     $COMPOSE down -v --remove-orphans --rmi local
-    $SUDO rm -rf "$INSTALL_DIR/data" "$INSTALL_DIR/sandbox-home"
+    $SUDO rm -rf "$dd" "$INSTALL_DIR/sandbox-home"
     $SUDO rm -f /usr/local/bin/ai2vpn "$CONF_FILE" 2>/dev/null || true
     ok "ai2vpn and its data were removed. (Backups in $INSTALL_DIR/backups and projects in $INSTALL_DIR/workspace were kept.)"
   else

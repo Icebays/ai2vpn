@@ -37,7 +37,7 @@ services:
       PUBLIC_URL: ${PUBLIC_URL:-}
       TZ: ${TZ:-UTC}
     volumes:
-      - ./data:/data
+      - ${A2V_DATA_DIR:-./data}:/data
       - sandbox-run:/run/sandbox
     shm_size: 1gb
 
